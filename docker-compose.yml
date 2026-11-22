@@ -1,0 +1,35 @@
+# docker compose up -d        mounts the filesystem on the host at ${DFS_HOST_MOUNT:-./mnt} (rshared propagation makes the FUSE mount visible there)
+# docker compose logs -f
+# docker compose down         unmounts it
+#
+# ssh access to the pcap host, either:
+#   - an agent: docker compose -f docker-compose.yml -f docker-compose.agent.yml up -d   (needs SSH_AUTH_SOCK in the environment), or
+#   - a key:    DFS_SSH_KEY=/path/to/key docker compose -f docker-compose.yml -f docker-compose.key.yml up -d
+# and DFS_KNOWN_HOSTS (default $HOME/.ssh/known_hosts) must already contain the host key.
+services:
+  datafeedfs:
+    build:
+      context: .
+      target: final
+    image: datafeedfs
+    restart: unless-stopped
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+      - label=disable
+    volumes:
+      - type: bind
+        source: ${DFS_HOST_MOUNT:-./mnt}
+        target: /mnt/datafeed
+        bind:
+          propagation: rshared
+          create_host_path: true
+      - ${DFS_CONFIG_FILE:-./config.toml}:/config/config.toml:ro
+      - ${DFS_KNOWN_HOSTS:-${HOME}/.ssh/known_hosts}:/root/.ssh/known_hosts:ro
+      - cache:/cache
+    stop_grace_period: 20s
+volumes:
+  cache:

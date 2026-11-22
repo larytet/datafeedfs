@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+parsers/itch_tob
+.pytest_cache/
+config.toml

@@ -1,0 +1,22 @@
+# datafeedfs configuration. Relative paths for the parser command are relative to this file.
+
+[remote]
+# user@host that holds the pcap files; an empty string means the files are on the local machine.
+ssh_host = "user@pcap-host.example.com"
+# One pcap per trading day. {yyyy} {mm} {dd} are replaced; the same pattern, with wildcards, is used to discover the days.
+pcap_path = "/data/pcaps/{yyyy}/{mm}/{dd}/nasdaq_itch.pcap.xz"
+
+[parser]
+# Run once per pass with the pcap (as stored) on stdin. See parsers/parse_nasdaq_itch.sh for the contract.
+command = "parsers/parse_nasdaq_itch.sh"
+# DFS_PORT restricts decoding to one UDP destination port (default: all ports in the pcap)
+# env = { DFS_PORT = "12345", DFS_PYTHON = "python3" }
+env = { DFS_PYTHON = "python3" }
+
+[cache]
+dir = "~/.cache/datafeedfs"
+
+[extract]
+batch_window_seconds = 3.0   # requests for the same day inside this window share one pass over the pcap
+max_parallel = 2             # passes over different days at once
+on_miss = "block"            # "block" or "async" (open() fails with EAGAIN and extraction continues in the background)
