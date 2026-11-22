@@ -10,8 +10,7 @@ pcap_path = "/data/pcaps/{yyyy}/{mm}/{dd}/nasdaq_itch.pcap.xz"
 # Run once per pass with the pcap (as stored) on stdin. See parsers/parse_nasdaq_itch.sh for the contract.
 command = "parsers/parse_nasdaq_itch.sh"
 # DFS_PORT restricts decoding to one UDP destination port (default: all ports in the pcap)
-# env = { DFS_PORT = "12345", DFS_PYTHON = "python3" }
-env = { DFS_PYTHON = "python3" }
+# env = { DFS_PORT = "12345" }
 
 [cache]
 dir = "~/.cache/datafeedfs"

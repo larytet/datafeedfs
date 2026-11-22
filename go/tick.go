@@ -6,7 +6,7 @@ import (
 	_ "time/tzdata" // the container has no tzdata; the day boundary is New York midnight
 )
 
-// Tick is one row of a per-symbol parquet file. The columns match the Python version (py/ingest.py).
+// Tick is one row of a per-symbol parquet file.
 // Prices are NaN when absent (no bid, no ask, no trade).
 type Tick struct {
 	Timestamp  int64   `parquet:"timestamp,timestamp(nanosecond)"`

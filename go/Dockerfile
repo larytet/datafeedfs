@@ -14,6 +14,7 @@ COPY go/ ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/datafeedfs-go .
 
 FROM go-build AS test
+COPY parsers /parsers
 RUN go vet ./...
 CMD ["go", "test", "./..."]
 

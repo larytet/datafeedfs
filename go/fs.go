@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"hash/fnv"
 	"io"
 	"os"
 	"strings"
@@ -62,6 +63,14 @@ var (
 	_ fs.NodeOpener    = (*statusNode)(nil)
 )
 
+// stableIno derives an inode number from the path, so the same file keeps the same inode across lookups
+// (cp and similar tools treat a changing inode as "file replaced while being copied").
+func stableIno(path string) uint64 {
+	hash := fnv.New64a()
+	hash.Write([]byte(path))
+	return hash.Sum64() | 1<<32 // never collides with the small numbers go-fuse hands out itself
+}
+
 // NewRoot returns the root node of the filesystem.
 func NewRoot(store *Store) fs.InodeEmbedder {
 	return &rootNode{store: store, started: time.Now()}
@@ -107,7 +116,7 @@ func (node *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 	noCache(out)
 	if name == ".status" {
 		fileAttributes(&out.Attr, 0, node.started)
-		return node.NewInode(ctx, &statusNode{store: node.store, started: node.started}, fs.StableAttr{Mode: syscall.S_IFREG}), 0
+		return node.NewInode(ctx, &statusNode{store: node.store, started: node.started}, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno("/.status")}), 0
 	}
 	if !symbolPattern.MatchString(name) {
 		return nil, syscall.ENOENT
@@ -120,7 +129,7 @@ func (node *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 		return nil, syscall.ENOENT
 	}
 	directoryAttributes(&out.Attr, node.started)
-	return node.NewInode(ctx, &symbolNode{store: node.store, symbol: name, started: node.started}, fs.StableAttr{Mode: syscall.S_IFDIR}), 0
+	return node.NewInode(ctx, &symbolNode{store: node.store, symbol: name, started: node.started}, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: stableIno("/" + name)}), 0
 }
 
 func (node *symbolNode) Getattr(ctx context.Context, handle fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -167,7 +176,7 @@ func (node *symbolNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 	child := &fileNode{store: node.store, symbol: node.symbol, day: day, extension: extension, started: node.started}
 	size, modified := child.cachedInfo()
 	fileAttributes(&out.Attr, size, modified)
-	return node.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG}), 0
+	return node.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno("/" + node.symbol + "/" + name)}), 0
 }
 
 func (node *fileNode) cachedInfo() (int64, time.Time) {

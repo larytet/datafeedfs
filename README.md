@@ -21,21 +21,12 @@ Each row of a file is an event in feed order: `timestamp` (exchange time as UTC)
 ## Layout
 
 ```
-py/        Python implementation (FUSE via fusepy, parquet via pyarrow): py/datafeedfs, py/ingest.py, py/tests
-go/        Go implementation, same config, same layout, same cache, no Python (go-fuse, parquet-go): single static binary
-parsers/   shared: itch_tob.c (ITCH order-book decoder) and parse_nasdaq_itch.sh (the parser contract script)
+go/        the filesystem (Go, go-fuse and parquet-go): a single static binary, Dockerfile, compose files, tests
+parsers/   itch_tob.c (C: ITCH order-book decoder) and parse_nasdaq_itch.sh (the parser contract script)
 ```
 
-The Go version replaces the Python filesystem and the Python ingest step; the C decoder is shared. Build and run it:
-
-```
-cd go && go build -o datafeedfs-go .
-./datafeedfs-go mount --allow-other ../config.toml ~/mnt/datafeed      # also: days, symbols, prefetch
-```
-
-It sets `DFS_INGEST="datafeedfs-go ingest"` for the parser script, so the pipeline is `ssh cat | xz -dc | itch_tob | datafeedfs-go ingest`
-with no Python anywhere. `DFS_PYTHON` is not needed with it. Outputs are the same parquet columns (`event` is a plain string column, dictionary
-encoded on disk) and CSV renders NaN prices as `nan`.
+The pipeline of a pass is `ssh cat | xz -dc -T0 | itch_tob | datafeedfs-go ingest`: the C decoder rebuilds the order books and the Go `ingest`
+subcommand writes the parquet files.
 
 ## How it works
 
@@ -53,30 +44,30 @@ Use `datafeedfs prefetch` to extract ahead of time, e.g. many symbols for a day 
 ## Usage
 
 ```
-cd py && python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp config.example.toml config.toml        # set ssh_host, pcap_path, and the parser python
-.venv/bin/python -m datafeedfs days config.toml
-.venv/bin/python -m datafeedfs mount config.toml ~/mnt/datafeed &
+cd go && go build -o datafeedfs-go .
+cp ../config.example.toml ../config.toml          # set ssh_host, pcap_path (the parser path is relative to the config file)
+export PATH=$PWD:$PATH                            # the parser script calls `datafeedfs-go ingest`
+datafeedfs-go days ../config.toml
+datafeedfs-go mount ../config.toml ~/mnt/datafeed &
 ls ~/mnt/datafeed/SPY
 python -c "import pandas as pd; print(pd.read_parquet('$HOME/mnt/datafeed/SPY/2026-11-20.parquet').head())"
 fusermount -u ~/mnt/datafeed
-.venv/bin/python -m datafeedfs prefetch config.toml 2026-11-20 AAPL MSFT NVDA     # one pass for all three
+datafeedfs-go prefetch ../config.toml 2026-11-20 AAPL MSFT NVDA     # one pass for all three
 ```
 
-Requirements (without Docker): FUSE (`fusermount`), Python 3.11, `gcc` (the parser builds `parsers/itch_tob` on first use), `xz` on the machine that runs the parser,
-and passwordless ssh to the host.
+Requirements (without Docker): Go, FUSE (`fusermount`), `gcc` (the parser builds `parsers/itch_tob` on first use), `xz` (5.4 or newer decompresses on all cores)
+on the machine that runs the parser, and passwordless ssh to the host.
 
 ## Deploy with Docker, step by step
 
-`py/` and `go/` each hold a complete Docker setup: `Dockerfile`, `docker-entrypoint.sh`, `docker-compose.yml`, `docker-compose.key.yml`, `docker-compose.agent.yml`
-and `config.docker.toml`. Pick one implementation and run every command below from its directory (`cd py` or `cd go`). The build context is the repository
-root because both images use the shared `parsers/` directory. The two setups use separate compose projects (`datafeedfs-py`, `datafeedfs-go`), images, cache volumes
-and default mount directories, so they can run side by side. The image holds the filesystem and the compiled parser (plus the Python dependencies in `py/`, nothing extra in `go/`).
-The host needs Docker with Compose, a Linux kernel with FUSE (`/dev/fuse`), and passwordless ssh from the host to the machine that stores the pcap files.
+`go/` holds the complete Docker setup: `Dockerfile`, `docker-entrypoint.sh`, `docker-compose.yml`, `docker-compose.key.yml`, `docker-compose.agent.yml`
+and `config.docker.toml`. Run every command below from the `go/` directory. The build context is the repository root because the image uses the `parsers/` directory.
+The image holds the static Go binary and the compiled parser; nothing else (no Python). The host needs Docker with Compose, a Linux kernel with FUSE (`/dev/fuse`),
+and passwordless ssh from the host to the machine that stores the pcap files.
 
 1. **Get the code on the host**
    ```
-   git clone git@github.com:larytet/datafeedfs.git && cd datafeedfs/go      # or datafeedfs/py
+   git clone git@github.com:larytet/datafeedfs.git && cd datafeedfs/go
    ```
 2. **Check ssh to the pcap host works without a password, from the host, and that its key is already trusted.** The container runs ssh with `BatchMode`, so it never
    prompts; a host key that is not in `known_hosts` fails the connection.
@@ -126,13 +117,9 @@ The host needs Docker with Compose, a Linux kernel with FUSE (`/dev/fuse`), and 
    ```
    docker compose -f docker-compose.yml -f docker-compose.key.yml down
    ```
-10. **Run the tests**
+10. **Run the tests** (`go vet`, the unit tests and the end-to-end test of the parser on a synthetic pcap)
     ```
-    # py: mounts the filesystem inside the container
-    docker build -f py/Dockerfile --target test -t datafeedfs-test ..          # from py/
-    docker run --rm --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined datafeedfs-test
-    # go: go vet and go test
-    docker build -f go/Dockerfile --target test -t datafeedfs-go-test ..       # from go/
+    docker build -f Dockerfile --target test -t datafeedfs-go-test ..
     docker run --rm datafeedfs-go-test
     ```
 
@@ -159,10 +146,10 @@ Troubleshooting:
   so every later read of that day is a cache hit and the pcap is read once per day.
 - Reading cached files costs no extra processes: the filesystem is multi-threaded and serves them with `pread`, any number in parallel.
 - Opening files that are not cached queues one extraction per (symbol, day). Requests for the **same day** that arrive within `batch_window_seconds` (3 s) share **one** pass, so
-  reading many symbols of one day at once starts one parser and one python process, not one per file. A request for that day that arrives **after** its pass has started cannot join it (the pcap stream
+  reading many symbols of one day at once starts one parser pipeline, not one per file. A request for that day that arrives **after** its pass has started cannot join it (the pcap stream
   is already past that point) and waits for the next pass of that day. Use `prefetch` with the full list of symbols you need to avoid this.
-- Different days run in parallel, up to `max_parallel` passes (default 2). Each pass is a pipeline of four processes: `ssh cat`, `xz -dc`, the C decoder `itch_tob` and the python `ingest.py`.
-  A pass uses roughly 2 to 3 cores; a single pcap is one xz stream, so one day cannot be decoded faster than one `xz` core (about 70 MB/s of decompressed pcap). To use more cores, raise `max_parallel`
+- Different days run in parallel, up to `max_parallel` passes (default 2). Each pass is a pipeline of four processes: `ssh cat`, `xz -dc`, the C decoder `itch_tob` and `datafeedfs-go ingest`.
+  A pass uses roughly 2 to 3 cores; `xz -T0` decompresses the multi-block pcap on all cores (about 10x faster than one core on 16 cores), after which the single-threaded decoder `itch_tob` (about 70 MB/s of decompressed pcap per core) is the limit. To use more cores, raise `max_parallel`
   and read several days at once; 6 parallel days pushed a 16-core machine to a load average near 29, so size `max_parallel` to the cores you have.
 - I/O: every pass reads the whole compressed pcap over ssh from the host (tens of GB for Nasdaq), so several passes share the host's disk, network and its single `sshd` encryption core.
   Raising `max_parallel` helps until that, or the CPU of the machine running the container, becomes the limit.
@@ -180,15 +167,16 @@ Troubleshooting:
 | `DFS_OUT_DIR` | extract: write `<SYMBOL>/<DFS_DATE>.parquet` here (symbols with no activity: no file, served as an empty table) |
 | `DFS_PORT` | optional: decode only this UDP destination port (default: all ports in the pcap) |
 
-Plus anything under `[parser] env`. `parsers/parse_nasdaq_itch.sh` is the bundled parser for Nasdaq TotalView-ITCH 5.0 over MoldUDP64:
+Plus anything under `[parser] env`, and `DFS_INGEST` (set by datafeedfs to `<this binary> ingest`) and `DFS_STOP_AT` (optional, seconds since midnight exchange time at which decoding stops,
+for short tests: `14520` is the first two minutes of the feed). `parsers/parse_nasdaq_itch.sh` is the bundled parser for Nasdaq TotalView-ITCH 5.0 over MoldUDP64:
 `parsers/itch_tob.c` (C, about 70 MB/s of decompressed pcap per core) rebuilds the order book of the chosen symbols, drops duplicate packets by
-sequence number and streams records to `py/ingest.py`, which writes the parquet files. Another feed needs only another script with the same contract.
+sequence number and streams records to `datafeedfs-go ingest`, which writes the parquet files. Another feed needs only another script with the same contract.
 
 ## Tests
 
 ```
-cd py && .venv/bin/python -m pytest
+cd go && go vet ./... && go test ./...
 ```
 
-`py/tests/synth_pcap.py` builds a small pcap with a known order-book story (adds, partial execution, delete, replace, a non-displayed trade and a
-duplicated packet); the tests check the parser output exactly, then mount the filesystem and read the same data through it.
+`go/parser_test.go` builds a small pcap with a known order-book story (adds, partial execution, delete, replace, a non-displayed trade and a
+duplicated packet) and checks the parser output exactly; `go/ingest_test.go` checks the parquet and CSV writers. Both need `gcc` and `bash`.

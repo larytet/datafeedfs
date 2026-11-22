@@ -1,7 +1,0 @@
-# Override: use the host's ssh agent instead of a key file.
-services:
-  datafeedfs:
-    environment:
-      SSH_AUTH_SOCK: /ssh-agent
-    volumes:
-      - ${SSH_AUTH_SOCK}:/ssh-agent

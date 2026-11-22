@@ -7,8 +7,8 @@
 #           DFS_SYMBOLS_FILE (extract) file with the symbols to keep, one per line
 #           DFS_OUT_DIR      (extract) directory to write <SYMBOL>/<DFS_DATE>.parquet into
 #           DFS_PORT         optional UDP destination port of the feed (default: any port in the pcap)
-#           DFS_PYTHON       optional python with pyarrow and numpy (default python3), runs ../py/ingest.py
-#           DFS_INGEST       optional command that replaces the python ingest, e.g. "datafeedfs-go ingest" (the Go version sets it)
+#           DFS_STOP_AT      optional: stop decoding at this many seconds since midnight (exchange time), for short tests; 14520 = 04:02, the first 2 minutes of the feed
+#           DFS_INGEST       command that writes the parquet files from itch_tob records (default: datafeedfs-go ingest; datafeedfs sets it)
 #   list    print the symbols of the day, one per line, and exit
 #   extract write one parquet per symbol with the tick-to-tick top of book and trades
 here=$(cd "$(dirname "$0")" && pwd)
@@ -23,8 +23,11 @@ if [ "$DFS_MODE" = list ]; then
     "${decompress[@]}" | "$here/itch_tob" --list-symbols 2>/dev/null
     exit "${PIPESTATUS[1]}"   # the decompressor dies of SIGPIPE once the directory is read; that is expected
 fi
-set -o pipefail
-if [ -n "$DFS_INGEST" ]; then read -ra ingest <<< "$DFS_INGEST"; else ingest=("${DFS_PYTHON:-python3}" "$here/../py/ingest.py"); fi
+read -ra ingest <<< "${DFS_INGEST:-datafeedfs-go ingest}"
 "${decompress[@]}" \
-    | "$here/itch_tob" --symbols-file "$DFS_SYMBOLS_FILE" --out - --port "${DFS_PORT:-0}" --table-bits "${DFS_TABLE_BITS:-22}" \
+    | "$here/itch_tob" --symbols-file "$DFS_SYMBOLS_FILE" --out - --port "${DFS_PORT:-0}" --table-bits "${DFS_TABLE_BITS:-22}" ${DFS_STOP_AT:+--stop-at "$DFS_STOP_AT"} \
     | "${ingest[@]}" "$DFS_DATE" "$DFS_SYMBOLS_FILE" "$DFS_OUT_DIR"
+status=("${PIPESTATUS[@]}")
+# with DFS_STOP_AT the decoder stops early and the decompressor dies of SIGPIPE: that is expected, any other stage must succeed
+[ -n "$DFS_STOP_AT" ] && status[0]=0
+for code in "${status[@]}"; do [ "$code" -eq 0 ] || exit "$code"; done

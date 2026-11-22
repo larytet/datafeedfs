@@ -2,7 +2,6 @@
 .venv
 __pycache__
 *.pyc
-.pytest_cache
 config.toml
 mnt
 parsers/itch_tob
