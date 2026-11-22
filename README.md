@@ -3,7 +3,7 @@
 A user-space filesystem (FUSE) that presents exchange market data pcap files as a tree of symbols and serves
 tick-to-tick top of book (best bid / ask) and trade data parsed from those files.
 
-The pcap files stay on a remote host. The filesystem is configured with an ssh host and the path where the pcap files live,
+The pcap files are the output of BEAK capture traffic (the exchange feed captured off the wire) and stay on a remote host. The filesystem is configured with an ssh host and the path where the pcap files live,
 and with a script that parses and filters the pcap stream down to the requested symbols.
 
 ```
@@ -17,6 +17,25 @@ and with a script that parses and filters the pcap stream down to the requested 
 Each row of a file is an event in feed order: `timestamp` (exchange time as UTC), `event` (`Q` best bid/ask changed,
 `T` trade, `X` cross), `bid`, `bid_size`, `ask`, `ask_size` (the book at that moment, for a trade the book as it was before it),
 `trade_price`, `trade_size`, `seq` (MoldUDP64 sequence number). An empty side is `NaN` / 0.
+
+## Layout
+
+```
+py/        Python implementation (FUSE via fusepy, parquet via pyarrow): py/datafeedfs, py/ingest.py, py/tests
+go/        Go implementation, same config, same layout, same cache, no Python (go-fuse, parquet-go): single static binary
+parsers/   shared: itch_tob.c (ITCH order-book decoder) and parse_nasdaq_itch.sh (the parser contract script)
+```
+
+The Go version replaces the Python filesystem and the Python ingest step; the C decoder is shared. Build and run it:
+
+```
+cd go && go build -o datafeedfs-go .
+./datafeedfs-go mount --allow-other ../config.toml ~/mnt/datafeed      # also: days, symbols, prefetch
+```
+
+It sets `DFS_INGEST="datafeedfs-go ingest"` for the parser script, so the pipeline is `ssh cat | xz -dc | itch_tob | datafeedfs-go ingest`
+with no Python anywhere. `DFS_PYTHON` is not needed with it. Outputs are the same parquet columns (`event` is a plain string column, dictionary
+encoded on disk) and CSV renders NaN prices as `nan`.
 
 ## How it works
 
@@ -34,7 +53,7 @@ Use `datafeedfs prefetch` to extract ahead of time, e.g. many symbols for a day 
 ## Usage
 
 ```
-python3.11 -m venv .venv && .venv/bin/pip install fusepy pyarrow numpy
+cd py && python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp config.example.toml config.toml        # set ssh_host, pcap_path, and the parser python
 .venv/bin/python -m datafeedfs days config.toml
 .venv/bin/python -m datafeedfs mount config.toml ~/mnt/datafeed &
@@ -153,13 +172,13 @@ Troubleshooting:
 
 Plus anything under `[parser] env`. `parsers/parse_nasdaq_itch.sh` is the bundled parser for Nasdaq TotalView-ITCH 5.0 over MoldUDP64:
 `parsers/itch_tob.c` (C, about 70 MB/s of decompressed pcap per core) rebuilds the order book of the chosen symbols, drops duplicate packets by
-sequence number and streams records to `parsers/ingest.py`, which writes the parquet files. Another feed needs only another script with the same contract.
+sequence number and streams records to `py/ingest.py`, which writes the parquet files. Another feed needs only another script with the same contract.
 
 ## Tests
 
 ```
-.venv/bin/python -m pytest
+cd py && .venv/bin/python -m pytest
 ```
 
-`tests/synth_pcap.py` builds a small pcap with a known order-book story (adds, partial execution, delete, replace, a non-displayed trade and a
+`py/tests/synth_pcap.py` builds a small pcap with a known order-book story (adds, partial execution, delete, replace, a non-displayed trade and a
 duplicated packet); the tests check the parser output exactly, then mount the filesystem and read the same data through it.

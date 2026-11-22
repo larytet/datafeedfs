@@ -11,10 +11,10 @@ if [ ! -f "$DFS_CONFIG" ]; then
     exit 2
 fi
 if [ "$command" != mount ]; then
-    exec python -m datafeedfs "$command" "$DFS_CONFIG" "$@"
+    cd /app/py && exec python -m datafeedfs "$command" "$DFS_CONFIG" "$@"
 fi
 mkdir -p "$DFS_MOUNTPOINT"
-python -m datafeedfs mount "$DFS_CONFIG" "$DFS_MOUNTPOINT" --allow-other &
+(cd /app/py && exec python -m datafeedfs mount "$DFS_CONFIG" "$DFS_MOUNTPOINT" --allow-other) &
 child=$!
 # unmount on docker stop so a bind-propagated mount does not stay behind on the host as "transport endpoint is not connected"
 trap 'fusermount -uz "$DFS_MOUNTPOINT" 2>/dev/null; kill "$child" 2>/dev/null' TERM INT

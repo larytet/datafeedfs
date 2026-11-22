@@ -4,3 +4,4 @@ __pycache__/
 parsers/itch_tob
 .pytest_cache/
 config.toml
+go/datafeedfs-go

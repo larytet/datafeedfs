@@ -1,6 +1,6 @@
 """Read itch_tob records from stdin and write one parquet part per symbol for one trading day.
 
-Usage: itch_tob ... --out - | ingest.py YYYY-MM-DD symbols.txt parts_dir
+Usage: itch_tob ... --out - | py/ingest.py YYYY-MM-DD symbols.txt parts_dir
 Writes parts_dir/<SYMBOL>/<YYYY-MM-DD>.parquet (row groups of up to FLUSH_ROWS rows). Symbols with no rows get no file.
 """
 import resource

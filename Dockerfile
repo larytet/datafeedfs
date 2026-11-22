@@ -11,9 +11,9 @@ FROM python:3.11-slim-bookworm AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends fuse libfuse2 openssh-client xz-utils zstd \
     && rm -rf /var/lib/apt/lists/* && mkdir -p /root/.ssh /cache /config /mnt/datafeed && chmod 700 /root/.ssh
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY datafeedfs ./datafeedfs
+COPY py/requirements.txt py/requirements.txt
+RUN pip install --no-cache-dir -r py/requirements.txt
+COPY py ./py
 COPY parsers ./parsers
 COPY --from=parser-build /src/itch_tob ./parsers/itch_tob
 COPY config.docker.toml /app/config.docker.toml
@@ -24,10 +24,9 @@ ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["mount"]
 
 FROM runtime AS test
-COPY requirements-dev.txt .
-RUN pip install --no-cache-dir -r requirements-dev.txt
-COPY tests ./tests
-COPY pytest.ini .
+COPY py/requirements-dev.txt py/requirements-dev.txt
+RUN pip install --no-cache-dir -r py/requirements-dev.txt
+WORKDIR /app/py
 ENTRYPOINT ["python", "-m", "pytest"]
 CMD ["-q"]
 

@@ -10,7 +10,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
-from conftest import ROOT, require_fuse
+from conftest import PY_ROOT, require_fuse
 
 CONFIG = """
 [remote]
@@ -37,7 +37,7 @@ def mounted(parser_script, pcap_root, tmp_path, request):
     config = tmp_path / "config.toml"
     config.write_text(CONFIG.format(pcaps=pcap_root, script=parser_script, python=sys.executable, cache=tmp_path / "cache", on_miss=on_miss))
     mountpoint = tmp_path / "mnt"
-    process = subprocess.Popen([sys.executable, "-m", "datafeedfs", "mount", str(config), str(mountpoint)], cwd=ROOT, stderr=subprocess.PIPE)
+    process = subprocess.Popen([sys.executable, "-m", "datafeedfs", "mount", str(config), str(mountpoint)], cwd=PY_ROOT, stderr=subprocess.PIPE)
     deadline = time.time() + 20
     while not os.path.ismount(mountpoint):
         if process.poll() is not None or time.time() > deadline:

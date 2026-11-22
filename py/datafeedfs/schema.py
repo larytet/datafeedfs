@@ -1,4 +1,4 @@
-"""Schema of the per-symbol parquet files. Must match parsers/ingest.py (tests/test_schema.py checks it)."""
+"""Schema of the per-symbol parquet files. Must match py/ingest.py (tests/test_schema.py checks it)."""
 import pyarrow as pa
 
 SCHEMA = pa.schema([

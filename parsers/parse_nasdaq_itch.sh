@@ -7,7 +7,8 @@
 #           DFS_SYMBOLS_FILE (extract) file with the symbols to keep, one per line
 #           DFS_OUT_DIR      (extract) directory to write <SYMBOL>/<DFS_DATE>.parquet into
 #           DFS_PORT         optional UDP destination port of the feed (default: any port in the pcap)
-#           DFS_PYTHON       optional python with pyarrow and numpy (default python3)
+#           DFS_PYTHON       optional python with pyarrow and numpy (default python3), runs ../py/ingest.py
+#           DFS_INGEST       optional command that replaces the python ingest, e.g. "datafeedfs-go ingest" (the Go version sets it)
 #   list    print the symbols of the day, one per line, and exit
 #   extract write one parquet per symbol with the tick-to-tick top of book and trades
 here=$(cd "$(dirname "$0")" && pwd)
@@ -23,6 +24,7 @@ if [ "$DFS_MODE" = list ]; then
     exit "${PIPESTATUS[1]}"   # the decompressor dies of SIGPIPE once the directory is read; that is expected
 fi
 set -o pipefail
+if [ -n "$DFS_INGEST" ]; then read -ra ingest <<< "$DFS_INGEST"; else ingest=("${DFS_PYTHON:-python3}" "$here/../py/ingest.py"); fi
 "${decompress[@]}" \
     | "$here/itch_tob" --symbols-file "$DFS_SYMBOLS_FILE" --out - --port "${DFS_PORT:-0}" --table-bits "${DFS_TABLE_BITS:-22}" \
-    | "${DFS_PYTHON:-python3}" "$here/ingest.py" "$DFS_DATE" "$DFS_SYMBOLS_FILE" "$DFS_OUT_DIR"
+    | "${ingest[@]}" "$DFS_DATE" "$DFS_SYMBOLS_FILE" "$DFS_OUT_DIR"
