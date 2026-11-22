@@ -21,7 +21,7 @@ Each row of a file is an event in feed order: `timestamp` (exchange time as UTC)
 ## Layout
 
 ```
-*.go       the filesystem (Go, go-fuse and parquet-go): a single static binary, with its tests
+src/       the filesystem (Go, go-fuse and parquet-go): a single static binary, with its tests
 Dockerfile, docker-compose*.yml, docker-entrypoint.sh, config.docker.toml   the container setup
 parsers/   itch_tob.c (C: ITCH order-book decoder) and parse_nasdaq_itch.sh (the parser contract script)
 ```
@@ -45,7 +45,7 @@ Use `datafeedfs prefetch` to extract ahead of time, e.g. many symbols for a day 
 ## Usage
 
 ```
-go build -o datafeedfs-go .
+go build -o datafeedfs-go ./src
 cp config.example.toml config.toml          # set ssh_host, pcap_path (the parser path is relative to the config file)
 export PATH=$PWD:$PATH                            # the parser script calls `datafeedfs-go ingest`
 datafeedfs-go days config.toml
@@ -179,5 +179,5 @@ sequence number and streams records to `datafeedfs-go ingest`, which writes the 
 go vet ./... && go test ./...
 ```
 
-`parser_test.go` builds a small pcap with a known order-book story (adds, partial execution, delete, replace, a non-displayed trade and a
-duplicated packet) and checks the parser output exactly; `ingest_test.go` checks the parquet and CSV writers. Both need `gcc` and `bash`.
+`src/parser_test.go` builds a small pcap with a known order-book story (adds, partial execution, delete, replace, a non-displayed trade and a
+duplicated packet) and checks the parser output exactly; `src/ingest_test.go` checks the parquet and CSV writers. Both need `gcc` and `bash`.

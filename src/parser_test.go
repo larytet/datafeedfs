@@ -111,7 +111,7 @@ func sameFloat(left, right float64) bool {
 
 func runParser(t *testing.T, binary, mode, outDir, symbolsFile string) string {
 	t.Helper()
-	command := exec.Command("bash", filepath.Join("parsers", "parse_nasdaq_itch.sh"))
+	command := exec.Command("bash", filepath.Join("..", "parsers", "parse_nasdaq_itch.sh"))
 	command.Stdin = bytes.NewReader(syntheticPcap(7))
 	command.Env = append(os.Environ(), "DFS_MODE="+mode, "DFS_DATE=2026-11-20", "DFS_PCAP_NAME=synthetic.pcap", "DFS_SYMBOLS_FILE="+symbolsFile,
 		"DFS_OUT_DIR="+outDir, "DFS_PORT=30001", "DFS_INGEST="+binary+" ingest")

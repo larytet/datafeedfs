@@ -10,8 +10,8 @@ FROM golang:1.26-bookworm AS go-build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
-COPY *.go ./
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/datafeedfs-go .
+COPY src ./src
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/datafeedfs-go ./src
 
 FROM go-build AS test
 COPY parsers ./parsers
