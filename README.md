@@ -38,7 +38,7 @@ subcommand writes the parquet files.
 3. The parser writes one parquet per symbol; they are cached under the cache directory and served from there afterwards.
    `.csv` files are rendered from the parquet on first read.
 
-While a file is not cached `ls -l` shows size 0; the mount uses `direct_io`, so readers (`cat`, pyarrow, pandas) do not depend on the size.
+While a file is not cached `ls -l` shows size 0; the mount uses `direct_io`, so readers (`cat`, parquet libraries) do not depend on the size.
 `on_miss = "async"` makes `open()` fail with `EAGAIN` instead of blocking while extraction runs in the background (watch `/.status`).
 Use `datafeedfs prefetch` to extract ahead of time, e.g. many symbols for a day in a single pass.
 
@@ -51,7 +51,7 @@ export PATH=$PWD:$PATH                            # the parser script calls `dat
 datafeedfs-go days config.toml
 datafeedfs-go mount config.toml ~/mnt/datafeed &
 ls ~/mnt/datafeed/SPY
-python -c "import pandas as pd; print(pd.read_parquet('$HOME/mnt/datafeed/SPY/2026-11-20.parquet').head())"
+head -5 ~/mnt/datafeed/SPY/2026-11-20.csv        # the parquet file opens in any parquet reader
 fusermount -u ~/mnt/datafeed
 datafeedfs-go prefetch config.toml 2026-11-20 AAPL MSFT NVDA     # one pass for all three
 ```
@@ -63,7 +63,7 @@ on the machine that runs the parser, and passwordless ssh to the host.
 
 The repository root holds the complete Docker setup: `Dockerfile`, `docker-entrypoint.sh`, `docker-compose.yml`, `docker-compose.key.yml`, `docker-compose.agent.yml`
 and `config.docker.toml`. Run every command below from the repository root.
-The image holds the static Go binary and the compiled parser; nothing else (no Python). The host needs Docker with Compose, a Linux kernel with FUSE (`/dev/fuse`),
+The image holds the static Go binary and the compiled parser; nothing else. Everything is Go and C; there is no Python. The host needs Docker with Compose, a Linux kernel with FUSE (`/dev/fuse`),
 and passwordless ssh from the host to the machine that stores the pcap files.
 
 1. **Get the code on the host**
@@ -108,7 +108,7 @@ and passwordless ssh from the host to the machine that stores the pcap files.
    To warm the cache, extract many symbols in one pass without mounting:
    ```
    docker compose -f docker-compose.yml -f docker-compose.key.yml run --rm datafeedfs prefetch 2026-11-20 AAPL MSFT NVDA
-   python -c "import pandas as pd; print(pd.read_parquet('$HOME/datafeed/AAPL/2026-11-20.parquet').head())"
+   head -5 ~/datafeed/AAPL/2026-11-20.csv      # or open the .parquet in any parquet reader
    ```
 8. **Update to a new version**
    ```
