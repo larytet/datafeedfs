@@ -14,7 +14,7 @@
 here=$(cd "$(dirname "$0")" && pwd)
 [ -x "$here/itch_tob" ] || gcc -O2 -o "$here/itch_tob" "$here/itch_tob.c" || { echo "cannot build itch_tob" >&2; exit 1; }
 case "$DFS_PCAP_NAME" in
-    *.xz) decompress=(xz -dc) ;;
+    *.xz) decompress=(xz -dc -T0) ;;   # -T0: threaded decompression of multi-block files (xz >= 5.4); older xz ignores it
     *.zst) decompress=(zstd -dc) ;;
     *.gz) decompress=(gzip -dc) ;;
     *) decompress=(cat) ;;
