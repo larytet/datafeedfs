@@ -169,22 +169,31 @@ class Store:
 
     def _run_batch(self, day: str, batch: dict[str, Future]) -> None:
         started = time.monotonic()
-        log.info("pass over %s for %d symbols: %s", day, len(batch), ",".join(sorted(batch)[:8]))
+        log.info("pass over %s for %d requested symbols: %s", day, len(batch), ",".join(sorted(batch)[:8]))
         work = self.cache / "_work" / f"{day}-{os.getpid()}-{self._pass_counter}"
         error: Exception | None = None
         try:
-            work.mkdir(parents=True)
-            symbols_file = work / "symbols.txt"
-            symbols_file.write_text("\n".join(sorted(batch)) + "\n")
-            self._run_pipeline(day, "extract", {"DFS_SYMBOLS_FILE": str(symbols_file), "DFS_OUT_DIR": str(work / "out")}, capture=False)
-            for symbol, future in batch.items():
-                target = self.parquet_path(symbol, day)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                produced = work / "out" / symbol / f"{day}.parquet"
-                if produced.exists():
-                    os.replace(produced, target)
-                else:  # the symbol had no activity that day: serve an empty table with the right columns
-                    pq.write_table(SCHEMA.empty_table(), target, compression="zstd")
+            if any(not self.parquet_path(symbol, day).exists() for symbol in batch):  # an earlier pass of this day may have cached them all
+                extract = sorted(batch)
+                if self.config.extract.whole_day:  # the pass costs the same for one symbol or all of them: take them all
+                    try:
+                        extract = self._symbols_for_day(day) or extract
+                    except ExtractionError:
+                        pass
+                work.mkdir(parents=True)
+                symbols_file = work / "symbols.txt"
+                symbols_file.write_text("\n".join(extract) + "\n")
+                self._run_pipeline(day, "extract", {"DFS_SYMBOLS_FILE": str(symbols_file), "DFS_OUT_DIR": str(work / "out")}, capture=False)
+                for symbol in extract:
+                    target = self.parquet_path(symbol, day)
+                    produced = work / "out" / symbol / f"{day}.parquet"
+                    if target.exists() or (not produced.exists() and symbol not in batch and not self.config.extract.whole_day):
+                        continue  # already cached, or not requested and no activity (a whole-day pass caches an empty table so the day is never read again)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if produced.exists():
+                        os.replace(produced, target)
+                    else:  # the symbol had no activity that day: serve an empty table with the right columns
+                        pq.write_table(SCHEMA.empty_table(), target, compression="zstd")
         except Exception as exception:  # noqa: BLE001 - reported to every waiting reader
             error = exception
             log.error("pass over %s failed: %s", day, exception)

@@ -14,7 +14,7 @@ services:
       context: ..
       dockerfile: py/Dockerfile
       target: final
-    image: datafeedfs
+    image: datafeedfs-py
     restart: unless-stopped
     devices:
       - /dev/fuse

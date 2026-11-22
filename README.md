@@ -154,6 +154,9 @@ Troubleshooting:
 
 ## Concurrency and resources
 
+- Reading the pcap is the expensive part, and a pass costs the same for one symbol or for every symbol of the day. Requests for a day inside
+  `batch_window_seconds` share one pass. With `whole_day = true` the first miss for a day extracts all of that day's symbols (about 0.5 to 3 GB of parquet),
+  so every later read of that day is a cache hit and the pcap is read once per day.
 - Reading cached files costs no extra processes: the filesystem is multi-threaded and serves them with `pread`, any number in parallel.
 - Opening files that are not cached queues one extraction per (symbol, day). Requests for the **same day** that arrive within `batch_window_seconds` (3 s) share **one** pass, so
   reading many symbols of one day at once starts one parser and one python process, not one per file. A request for that day that arrives **after** its pass has started cannot join it (the pcap stream

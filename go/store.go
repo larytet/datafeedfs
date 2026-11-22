@@ -363,29 +363,54 @@ func (store *Store) runBatch(day string, batch map[string]*Future) {
 	if len(preview) > 8 {
 		preview = preview[:8]
 	}
-	log.Printf("pass over %s for %d symbols: %s", day, len(symbols), strings.Join(preview, ","))
+	log.Printf("pass over %s for %d requested symbols: %s", day, len(symbols), strings.Join(preview, ","))
 	store.mutex.Lock()
 	store.passCounter++
 	work := filepath.Join(store.cache, "_work", fmt.Sprintf("%s-%d-%d", day, os.Getpid(), store.passCounter))
 	store.mutex.Unlock()
 
 	err := func() error {
+		var missing []string // requested symbols that an earlier pass of this day did not already cache
+		for _, symbol := range symbols {
+			if _, err := os.Stat(store.ParquetPath(symbol, day)); err != nil {
+				missing = append(missing, symbol)
+			}
+		}
+		if len(missing) == 0 {
+			return nil
+		}
+		extract := symbols
+		if store.config.Extract.WholeDay { // the pass costs the same for one symbol or all of them: take them all
+			if all, err := store.SymbolsForDay(day); err == nil && len(all) > 0 {
+				extract = all
+			}
+		}
 		if err := os.MkdirAll(work, 0o755); err != nil {
 			return err
 		}
 		symbolsFile := filepath.Join(work, "symbols.txt")
-		if err := os.WriteFile(symbolsFile, []byte(strings.Join(symbols, "\n")+"\n"), 0o644); err != nil {
+		if err := os.WriteFile(symbolsFile, []byte(strings.Join(extract, "\n")+"\n"), 0o644); err != nil {
 			return err
 		}
 		if _, err := store.runPipeline(day, "extract", map[string]string{"DFS_SYMBOLS_FILE": symbolsFile, "DFS_OUT_DIR": filepath.Join(work, "out")}, false); err != nil {
 			return err
 		}
+		requested := make(map[string]bool, len(symbols))
 		for _, symbol := range symbols {
+			requested[symbol] = true
+		}
+		for _, symbol := range extract {
 			target := store.ParquetPath(symbol, day)
+			if _, err := os.Stat(target); err == nil {
+				continue
+			}
+			produced := filepath.Join(work, "out", symbol, day+".parquet")
+			if _, err := os.Stat(produced); err != nil && !requested[symbol] && !store.config.Extract.WholeDay {
+				continue // not requested and no activity: nothing to cache (a whole-day pass caches an empty table so the day is never read again)
+			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}
-			produced := filepath.Join(work, "out", symbol, day+".parquet")
 			if _, err := os.Stat(produced); err == nil {
 				if err := moveFile(produced, target); err != nil {
 					return err

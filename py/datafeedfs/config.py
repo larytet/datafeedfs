@@ -23,6 +23,7 @@ class ExtractConfig:
     batch_window_seconds: float = 3.0  # requests for the same day within this window share one pass over the pcap
     max_parallel: int = 2              # passes over different days running at once
     on_miss: str = "block"             # "block": open() waits for the extraction; "async": open() fails with EAGAIN and extracts in the background
+    whole_day: bool = False            # a miss extracts every symbol of that day in the same pass: the pcap is read once per day
 
 
 @dataclass

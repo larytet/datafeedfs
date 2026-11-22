@@ -27,6 +27,7 @@ type ExtractConfig struct {
 	BatchWindowSeconds float64 `toml:"batch_window_seconds"` // requests for one day inside this window share a pass over the pcap
 	MaxParallel        int     `toml:"max_parallel"`         // passes over different days at once
 	OnMiss             string  `toml:"on_miss"`              // "block" or "async" (open fails with EAGAIN, extraction continues)
+	WholeDay           bool    `toml:"whole_day"`            // a miss extracts every symbol of that day in the same pass: the pcap is read once per day
 }
 
 type Config struct {

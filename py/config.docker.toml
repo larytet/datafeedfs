@@ -19,3 +19,4 @@ dir = "/cache"
 batch_window_seconds = 3.0
 max_parallel = 2
 on_miss = "block"
+whole_day = true             # a miss extracts every symbol of that day in one pass: the pcap is read once per day (needs disk: ~0.5-3 GB per day)

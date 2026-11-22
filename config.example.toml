@@ -20,3 +20,4 @@ dir = "~/.cache/datafeedfs"
 batch_window_seconds = 3.0   # requests for the same day inside this window share one pass over the pcap
 max_parallel = 2             # passes over different days at once
 on_miss = "block"            # "block" or "async" (open() fails with EAGAIN and extraction continues in the background)
+whole_day = false            # true: a miss extracts every symbol of that day in one pass, so the pcap is read once per day (more disk, much less I/O)
