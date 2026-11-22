@@ -1,3 +1,5 @@
+name: datafeedfs-py
+# Python implementation. Run from this directory (py/); the build context is the repository root (it shares ../parsers).
 # docker compose up -d        mounts the filesystem on the host at ${DFS_HOST_MOUNT:-./mnt} (rshared propagation makes the FUSE mount visible there)
 # docker compose logs -f
 # docker compose down         unmounts it
@@ -9,7 +11,8 @@
 services:
   datafeedfs:
     build:
-      context: .
+      context: ..
+      dockerfile: py/Dockerfile
       target: final
     image: datafeedfs
     restart: unless-stopped

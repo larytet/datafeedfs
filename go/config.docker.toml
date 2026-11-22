@@ -1,0 +1,20 @@
+# Example config for the container. Mount your copy at /config/config.toml (see docker-compose.yml).
+
+[remote]
+ssh_host = "user@pcap-host.example.com"
+pcap_path = "/data/pcaps/{yyyy}/{mm}/{dd}/nasdaq_itch.pcap.xz"
+# the container has no interactive terminal: never prompt; new host keys are not accepted silently, mount a known_hosts file
+ssh_options = ["-o", "BatchMode=yes", "-o", "ServerAliveInterval=30"]
+
+[parser]
+command = "/app/parsers/parse_nasdaq_itch.sh"
+# DFS_PORT restricts decoding to one UDP destination port (default: all ports in the pcap)
+# env = { DFS_PORT = "12345" }
+
+[cache]
+dir = "/cache"
+
+[extract]
+batch_window_seconds = 3.0
+max_parallel = 2
+on_miss = "block"

@@ -68,12 +68,15 @@ and passwordless ssh to the host.
 
 ## Deploy with Docker, step by step
 
-The image holds the filesystem, the compiled parser and the Python dependencies. The host needs Docker with Compose, a Linux kernel with FUSE (`/dev/fuse`),
-and passwordless ssh from the host to the machine that stores the pcap files.
+`py/` and `go/` each hold a complete Docker setup: `Dockerfile`, `docker-entrypoint.sh`, `docker-compose.yml`, `docker-compose.key.yml`, `docker-compose.agent.yml`
+and `config.docker.toml`. Pick one implementation and run every command below from its directory (`cd py` or `cd go`). The build context is the repository
+root because both images use the shared `parsers/` directory. The two setups use separate compose projects (`datafeedfs-py`, `datafeedfs-go`), images, cache volumes
+and default mount directories, so they can run side by side. The image holds the filesystem and the compiled parser (plus the Python dependencies in `py/`, nothing extra in `go/`).
+The host needs Docker with Compose, a Linux kernel with FUSE (`/dev/fuse`), and passwordless ssh from the host to the machine that stores the pcap files.
 
 1. **Get the code on the host**
    ```
-   git clone git@github.com:larytet/datafeedfs.git && cd datafeedfs
+   git clone git@github.com:larytet/datafeedfs.git && cd datafeedfs/go      # or datafeedfs/py
    ```
 2. **Check ssh to the pcap host works without a password, from the host, and that its key is already trusted.** The container runs ssh with `BatchMode`, so it never
    prompts; a host key that is not in `known_hosts` fails the connection.
@@ -123,10 +126,14 @@ and passwordless ssh from the host to the machine that stores the pcap files.
    ```
    docker compose -f docker-compose.yml -f docker-compose.key.yml down
    ```
-10. **Run the tests** (they mount the filesystem inside the container)
+10. **Run the tests**
     ```
-    docker build --target test -t datafeedfs-test .
+    # py: mounts the filesystem inside the container
+    docker build -f py/Dockerfile --target test -t datafeedfs-test ..          # from py/
     docker run --rm --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined datafeedfs-test
+    # go: go vet and go test
+    docker build -f go/Dockerfile --target test -t datafeedfs-go-test ..       # from go/
+    docker run --rm datafeedfs-go-test
     ```
 
 One-off commands run without a mount: `docker compose ... run --rm datafeedfs days | symbols [DAY] | prefetch DAY SYMBOL...`.
