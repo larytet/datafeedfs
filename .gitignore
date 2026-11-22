@@ -3,4 +3,4 @@ __pycache__/
 *.pyc
 parsers/itch_tob
 config.toml
-go/datafeedfs-go
+datafeedfs-go

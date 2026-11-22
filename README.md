@@ -21,7 +21,8 @@ Each row of a file is an event in feed order: `timestamp` (exchange time as UTC)
 ## Layout
 
 ```
-go/        the filesystem (Go, go-fuse and parquet-go): a single static binary, Dockerfile, compose files, tests
+*.go       the filesystem (Go, go-fuse and parquet-go): a single static binary, with its tests
+Dockerfile, docker-compose*.yml, docker-entrypoint.sh, config.docker.toml   the container setup
 parsers/   itch_tob.c (C: ITCH order-book decoder) and parse_nasdaq_itch.sh (the parser contract script)
 ```
 
@@ -44,15 +45,15 @@ Use `datafeedfs prefetch` to extract ahead of time, e.g. many symbols for a day 
 ## Usage
 
 ```
-cd go && go build -o datafeedfs-go .
-cp ../config.example.toml ../config.toml          # set ssh_host, pcap_path (the parser path is relative to the config file)
+go build -o datafeedfs-go .
+cp config.example.toml config.toml          # set ssh_host, pcap_path (the parser path is relative to the config file)
 export PATH=$PWD:$PATH                            # the parser script calls `datafeedfs-go ingest`
-datafeedfs-go days ../config.toml
-datafeedfs-go mount ../config.toml ~/mnt/datafeed &
+datafeedfs-go days config.toml
+datafeedfs-go mount config.toml ~/mnt/datafeed &
 ls ~/mnt/datafeed/SPY
 python -c "import pandas as pd; print(pd.read_parquet('$HOME/mnt/datafeed/SPY/2026-11-20.parquet').head())"
 fusermount -u ~/mnt/datafeed
-datafeedfs-go prefetch ../config.toml 2026-11-20 AAPL MSFT NVDA     # one pass for all three
+datafeedfs-go prefetch config.toml 2026-11-20 AAPL MSFT NVDA     # one pass for all three
 ```
 
 Requirements (without Docker): Go, FUSE (`fusermount`), `gcc` (the parser builds `parsers/itch_tob` on first use), `xz` (5.4 or newer decompresses on all cores)
@@ -60,14 +61,14 @@ on the machine that runs the parser, and passwordless ssh to the host.
 
 ## Deploy with Docker, step by step
 
-`go/` holds the complete Docker setup: `Dockerfile`, `docker-entrypoint.sh`, `docker-compose.yml`, `docker-compose.key.yml`, `docker-compose.agent.yml`
-and `config.docker.toml`. Run every command below from the `go/` directory. The build context is the repository root because the image uses the `parsers/` directory.
+The repository root holds the complete Docker setup: `Dockerfile`, `docker-entrypoint.sh`, `docker-compose.yml`, `docker-compose.key.yml`, `docker-compose.agent.yml`
+and `config.docker.toml`. Run every command below from the repository root.
 The image holds the static Go binary and the compiled parser; nothing else (no Python). The host needs Docker with Compose, a Linux kernel with FUSE (`/dev/fuse`),
 and passwordless ssh from the host to the machine that stores the pcap files.
 
 1. **Get the code on the host**
    ```
-   git clone git@github.com:larytet/datafeedfs.git && cd datafeedfs/go
+   git clone git@github.com:larytet/datafeedfs.git && cd datafeedfs
    ```
 2. **Check ssh to the pcap host works without a password, from the host, and that its key is already trusted.** The container runs ssh with `BatchMode`, so it never
    prompts; a host key that is not in `known_hosts` fails the connection.
@@ -119,7 +120,7 @@ and passwordless ssh from the host to the machine that stores the pcap files.
    ```
 10. **Run the tests** (`go vet`, the unit tests and the end-to-end test of the parser on a synthetic pcap)
     ```
-    docker build -f Dockerfile --target test -t datafeedfs-go-test ..
+    docker build --target test -t datafeedfs-go-test .
     docker run --rm datafeedfs-go-test
     ```
 
@@ -175,8 +176,8 @@ sequence number and streams records to `datafeedfs-go ingest`, which writes the 
 ## Tests
 
 ```
-cd go && go vet ./... && go test ./...
+go vet ./... && go test ./...
 ```
 
-`go/parser_test.go` builds a small pcap with a known order-book story (adds, partial execution, delete, replace, a non-displayed trade and a
-duplicated packet) and checks the parser output exactly; `go/ingest_test.go` checks the parquet and CSV writers. Both need `gcc` and `bash`.
+`parser_test.go` builds a small pcap with a known order-book story (adds, partial execution, delete, replace, a non-displayed trade and a
+duplicated packet) and checks the parser output exactly; `ingest_test.go` checks the parquet and CSV writers. Both need `gcc` and `bash`.

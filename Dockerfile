@@ -1,6 +1,6 @@
 # datafeedfs image, Go implementation: static Go binary + the bundled Nasdaq ITCH parser, no Python. Build from the repository root:
-#   docker build -f go/Dockerfile -t datafeedfs-go .
-#   docker build -f go/Dockerfile --target test -t datafeedfs-go-test . && docker run --rm datafeedfs-go-test
+#   docker build -t datafeedfs-go .
+#   docker build --target test -t datafeedfs-go-test . && docker run --rm datafeedfs-go-test
 FROM debian:bookworm-slim AS parser-build
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && rm -rf /var/lib/apt/lists/*
 COPY parsers/itch_tob.c /src/itch_tob.c
@@ -8,13 +8,13 @@ RUN gcc -O2 -Wall -o /src/itch_tob /src/itch_tob.c
 
 FROM golang:1.26-bookworm AS go-build
 WORKDIR /src
-COPY go/go.mod go/go.sum ./
+COPY go.mod go.sum ./
 RUN go mod download
-COPY go/ ./
+COPY *.go ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/datafeedfs-go .
 
 FROM go-build AS test
-COPY parsers /parsers
+COPY parsers ./parsers
 RUN go vet ./...
 CMD ["go", "test", "./..."]
 
@@ -27,8 +27,8 @@ WORKDIR /app
 COPY parsers ./parsers
 COPY --from=parser-build /src/itch_tob ./parsers/itch_tob
 COPY --from=go-build /out/datafeedfs-go /usr/local/bin/datafeedfs-go
-COPY go/config.docker.toml /app/config.docker.toml
-COPY go/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY config.docker.toml /app/config.docker.toml
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 ENV DFS_CONFIG=/config/config.toml DFS_MOUNTPOINT=/mnt/datafeed
 VOLUME ["/cache"]
 ENTRYPOINT ["docker-entrypoint.sh"]

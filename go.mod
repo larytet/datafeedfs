@@ -1,4 +1,4 @@
-module github.com/larytet/datafeedfs/go
+module github.com/larytet/datafeedfs
 
 go 1.26.0
 

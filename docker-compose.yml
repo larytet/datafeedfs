@@ -1,5 +1,4 @@
 name: datafeedfs-go
-# Go implementation. Run from this directory (go/); the build context is the repository root (it shares ../parsers).
 # docker compose up -d        mounts the filesystem on the host at ${DFS_HOST_MOUNT:-./mnt} (rshared propagation makes the FUSE mount visible there)
 # docker compose logs -f
 # docker compose down         unmounts it
@@ -11,8 +10,8 @@ name: datafeedfs-go
 services:
   datafeedfs:
     build:
-      context: ..
-      dockerfile: go/Dockerfile
+      context: .
+      dockerfile: Dockerfile
       target: final
     image: datafeedfs-go
     restart: unless-stopped
