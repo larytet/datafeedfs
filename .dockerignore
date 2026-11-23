@@ -5,3 +5,6 @@ __pycache__
 config.toml
 mnt
 parsers/itch_tob
+testdata
+e2e
+tools

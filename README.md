@@ -197,3 +197,4 @@ go vet ./... && go test ./...
 
 `src/parser_test.go` builds a small pcap with a known order-book story (adds, partial execution, delete, replace, a non-displayed trade and a
 duplicated packet) and checks the parser output exactly; `src/ingest_test.go` checks the parquet and CSV writers. Both need `gcc` and `bash`.
+The end-to-end test (`e2e/run.sh`, plan in [testplan.md](testplan.md)) builds the image, serves a 5 MB synthetic pcap (Git LFS, made by `tools/genpcap`) from an sshd container and checks samples of the tick, orderbook and stream files.
