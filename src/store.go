@@ -48,20 +48,26 @@ func (future *Future) Wait() (string, error) {
 	return future.path, future.err
 }
 
-type dayKey struct{ day, symbol string }
+// passKey identifies one pass over a day's pcap: the files of one kind for that day.
+type passKey struct{ kind, day string }
+
+func (key passKey) String() string { return key.kind + " " + key.day }
+
+type fileKey struct{ kind, day, symbol string }
 
 // Store owns remote access, extraction scheduling and the on-disk cache:
-// <cache>/<SYMBOL>/<YYYY-MM-DD>.parquet (and .csv on demand), <cache>/_symbols/<day>.txt, <cache>/_logs/.
-// Requests for one day that arrive within the batch window are served by a single pass over that day's pcap.
+// <cache>/<kind>/<SYMBOL>/<YYYY-MM-DD>.parquet (and .csv on demand), <cache>/_symbols/<day>.txt, <cache>/_logs/. The kind directory
+// is tick, orderbook-<depth> (a different depth is a different cache) or stream.
+// Requests for one day and kind that arrive within the batch window are served by a single pass over that day's pcap.
 type Store struct {
 	config *Config
 	cache  string
 
 	mutex        sync.Mutex
-	pending      map[string]map[string]*Future // day -> symbol -> future waiting for the next pass
-	firstRequest map[string]time.Time
-	inflight     map[dayKey]*Future
-	runningDays  map[string]bool
+	pending      map[passKey]map[string]*Future // pass -> symbol -> future waiting for the next pass
+	firstRequest map[passKey]time.Time
+	inflight     map[fileKey]*Future
+	runningDays  map[passKey]bool
 	failures     map[string]string
 	passCounter  int
 	wake         chan struct{}
@@ -77,16 +83,39 @@ type Store struct {
 func NewStore(config *Config) (*Store, error) {
 	store := &Store{
 		config: config, cache: config.CacheDir,
-		pending: map[string]map[string]*Future{}, firstRequest: map[string]time.Time{}, inflight: map[dayKey]*Future{},
-		runningDays: map[string]bool{}, failures: map[string]string{}, wake: make(chan struct{}, 1),
+		pending: map[passKey]map[string]*Future{}, firstRequest: map[passKey]time.Time{}, inflight: map[fileKey]*Future{},
+		runningDays: map[passKey]bool{}, failures: map[string]string{}, wake: make(chan struct{}, 1),
 	}
 	for _, name := range []string{"_symbols", "_logs", "_work"} {
 		if err := os.MkdirAll(filepath.Join(store.cache, name), 0o755); err != nil {
 			return nil, err
 		}
 	}
+	if err := migrateLegacyCache(store.cache); err != nil {
+		return nil, err
+	}
 	go store.scheduler()
 	return store, nil
+}
+
+// migrateLegacyCache moves <cache>/<SYMBOL> of the layout before the kinds into <cache>/tick/<SYMBOL>.
+func migrateLegacyCache(cache string) error {
+	entries, err := os.ReadDir(cache)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !symbolPattern.MatchString(entry.Name()) {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Join(cache, kindTick), 0o755); err != nil {
+			return err
+		}
+		if err := os.Rename(filepath.Join(cache, entry.Name()), filepath.Join(cache, kindTick, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ----- remote access ---------------------------------------------------------------------------------------------------------
@@ -269,20 +298,28 @@ func shellQuote(text string) string { return "'" + strings.ReplaceAll(text, "'",
 
 // ----- cache -----------------------------------------------------------------------------------------------------------------
 
-func (store *Store) ParquetPath(symbol, day string) string {
-	return filepath.Join(store.cache, symbol, day+".parquet")
+// kindDir is the cache directory of a kind. The depth is part of the orderbook directory: changing orderbook.depth starts a new cache.
+func (store *Store) kindDir(kind string) string {
+	if kind == kindOrderbook {
+		return filepath.Join(store.cache, fmt.Sprintf("%s-%d", kindOrderbook, store.config.Orderbook.Depth))
+	}
+	return filepath.Join(store.cache, kind)
 }
 
-func (store *Store) CSVPath(symbol, day string) string {
-	return filepath.Join(store.cache, symbol, day+".csv")
+func (store *Store) ParquetPath(kind, symbol, day string) string {
+	return filepath.Join(store.kindDir(kind), symbol, day+".parquet")
 }
 
-func (store *Store) EnsureCSV(symbol, day string) (string, error) {
-	target := store.CSVPath(symbol, day)
+func (store *Store) CSVPath(kind, symbol, day string) string {
+	return filepath.Join(store.kindDir(kind), symbol, day+".csv")
+}
+
+func (store *Store) EnsureCSV(kind, symbol, day string) (string, error) {
+	target := store.CSVPath(kind, symbol, day)
 	store.csvMutex.Lock()
 	defer store.csvMutex.Unlock()
 	if _, err := os.Stat(target); err != nil {
-		if err := WriteCSV(store.ParquetPath(symbol, day), target); err != nil {
+		if err := WriteCSV(store.ParquetPath(kind, symbol, day), target); err != nil {
 			return "", err
 		}
 	}
@@ -291,12 +328,13 @@ func (store *Store) EnsureCSV(symbol, day string) (string, error) {
 
 // ----- extraction ------------------------------------------------------------------------------------------------------------
 
-// Request returns a Future for the cached parquet path of (symbol, day), queueing an extraction when it is not cached.
-func (store *Store) Request(symbol, day string) *Future {
-	path := store.ParquetPath(symbol, day)
+// Request returns a Future for the cached parquet path of (kind, symbol, day), queueing an extraction when it is not cached.
+func (store *Store) Request(kind, symbol, day string) *Future {
+	path := store.ParquetPath(kind, symbol, day)
+	pass := passKey{kind, day}
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
-	if future := store.inflight[dayKey{day, symbol}]; future != nil {
+	if future := store.inflight[fileKey{kind, day, symbol}]; future != nil {
 		return future
 	}
 	future := newFuture()
@@ -304,13 +342,13 @@ func (store *Store) Request(symbol, day string) *Future {
 		future.resolve(path, nil)
 		return future
 	}
-	store.inflight[dayKey{day, symbol}] = future
-	if store.pending[day] == nil {
-		store.pending[day] = map[string]*Future{}
+	store.inflight[fileKey{kind, day, symbol}] = future
+	if store.pending[pass] == nil {
+		store.pending[pass] = map[string]*Future{}
 	}
-	store.pending[day][symbol] = future
-	if _, ok := store.firstRequest[day]; !ok {
-		store.firstRequest[day] = time.Now()
+	store.pending[pass][symbol] = future
+	if _, ok := store.firstRequest[pass]; !ok {
+		store.firstRequest[pass] = time.Now()
 	}
 	select {
 	case store.wake <- struct{}{}:
@@ -326,16 +364,16 @@ func (store *Store) scheduler() {
 	for {
 		store.mutex.Lock()
 		for len(store.runningDays) < store.config.Extract.MaxParallel {
-			var chosen string
-			for day, symbols := range store.pending {
-				if len(symbols) == 0 || store.runningDays[day] || time.Since(store.firstRequest[day]) < window {
+			var chosen passKey
+			for pass, symbols := range store.pending {
+				if len(symbols) == 0 || store.runningDays[pass] || time.Since(store.firstRequest[pass]) < window {
 					continue
 				}
-				if chosen == "" || store.firstRequest[day].Before(store.firstRequest[chosen]) {
-					chosen = day
+				if chosen == (passKey{}) || store.firstRequest[pass].Before(store.firstRequest[chosen]) {
+					chosen = pass
 				}
 			}
-			if chosen == "" {
+			if chosen == (passKey{}) {
 				break
 			}
 			batch := store.pending[chosen]
@@ -352,7 +390,8 @@ func (store *Store) scheduler() {
 	}
 }
 
-func (store *Store) runBatch(day string, batch map[string]*Future) {
+func (store *Store) runBatch(pass passKey, batch map[string]*Future) {
+	kind, day := pass.kind, pass.day
 	started := time.Now()
 	symbols := make([]string, 0, len(batch))
 	for symbol := range batch {
@@ -363,7 +402,7 @@ func (store *Store) runBatch(day string, batch map[string]*Future) {
 	if len(preview) > 8 {
 		preview = preview[:8]
 	}
-	log.Printf("pass over %s for %d requested symbols: %s", day, len(symbols), strings.Join(preview, ","))
+	log.Printf("%s pass over %s for %d requested symbols: %s", kind, day, len(symbols), strings.Join(preview, ","))
 	store.mutex.Lock()
 	store.passCounter++
 	work := filepath.Join(store.cache, "_work", fmt.Sprintf("%s-%d-%d", day, os.Getpid(), store.passCounter))
@@ -372,7 +411,7 @@ func (store *Store) runBatch(day string, batch map[string]*Future) {
 	err := func() error {
 		var missing []string // requested symbols that an earlier pass of this day did not already cache
 		for _, symbol := range symbols {
-			if _, err := os.Stat(store.ParquetPath(symbol, day)); err != nil {
+			if _, err := os.Stat(store.ParquetPath(kind, symbol, day)); err != nil {
 				missing = append(missing, symbol)
 			}
 		}
@@ -392,7 +431,11 @@ func (store *Store) runBatch(day string, batch map[string]*Future) {
 		if err := os.WriteFile(symbolsFile, []byte(strings.Join(extract, "\n")+"\n"), 0o644); err != nil {
 			return err
 		}
-		if _, err := store.runPipeline(day, "extract", map[string]string{"DFS_SYMBOLS_FILE": symbolsFile, "DFS_OUT_DIR": filepath.Join(work, "out")}, false); err != nil {
+		environment := map[string]string{"DFS_SYMBOLS_FILE": symbolsFile, "DFS_OUT_DIR": filepath.Join(work, "out"), "DFS_KIND": kind}
+		if kind == kindOrderbook {
+			environment["DFS_DEPTH"] = fmt.Sprint(store.config.Orderbook.Depth)
+		}
+		if _, err := store.runPipeline(day, "extract", environment, false); err != nil {
 			return err
 		}
 		requested := make(map[string]bool, len(symbols))
@@ -400,7 +443,7 @@ func (store *Store) runBatch(day string, batch map[string]*Future) {
 			requested[symbol] = true
 		}
 		for _, symbol := range extract {
-			target := store.ParquetPath(symbol, day)
+			target := store.ParquetPath(kind, symbol, day)
 			if _, err := os.Stat(target); err == nil {
 				continue
 			}
@@ -415,39 +458,39 @@ func (store *Store) runBatch(day string, batch map[string]*Future) {
 				if err := moveFile(produced, target); err != nil {
 					return err
 				}
-			} else if err := writeEmpty(target); err != nil { // no activity that day: serve an empty table with the right columns
+			} else if err := writeEmpty(target, schemaFor(kind, store.config.Orderbook.Depth)); err != nil { // no activity that day: serve an empty table with the right columns
 				return err
 			}
 		}
 		return nil
 	}()
 	if err != nil {
-		log.Printf("pass over %s failed: %v", day, err)
+		log.Printf("%s pass over %s failed: %v", kind, day, err)
 	}
 	os.RemoveAll(work)
 
 	store.mutex.Lock()
 	for symbol, future := range batch {
-		delete(store.inflight, dayKey{day, symbol})
+		delete(store.inflight, fileKey{kind, day, symbol})
 		if err == nil {
-			delete(store.failures, symbol+" "+day)
-			future.resolve(store.ParquetPath(symbol, day), nil)
+			delete(store.failures, kind+" "+symbol+" "+day)
+			future.resolve(store.ParquetPath(kind, symbol, day), nil)
 		} else {
 			message := err.Error()
 			if len(message) > 300 {
 				message = message[:300]
 			}
-			store.failures[symbol+" "+day] = message
+			store.failures[kind+" "+symbol+" "+day] = message
 			future.resolve("", errors.New(err.Error()))
 		}
 	}
-	delete(store.runningDays, day)
+	delete(store.runningDays, pass)
 	store.mutex.Unlock()
 	status := "ok"
 	if err != nil {
 		status = "failed"
 	}
-	log.Printf("pass over %s finished in %.0fs (%s)", day, time.Since(started).Seconds(), status)
+	log.Printf("%s pass over %s finished in %.0fs (%s)", kind, day, time.Since(started).Seconds(), status)
 	select {
 	case store.wake <- struct{}{}:
 	default:
@@ -470,13 +513,13 @@ func moveFile(source, target string) error {
 	return os.Rename(temporary, target)
 }
 
-func writeEmpty(path string) error {
+func writeEmpty(path string, schema *parquet.Schema) error {
 	temporary := path + ".tmp"
 	file, err := os.Create(temporary)
 	if err != nil {
 		return err
 	}
-	writer := parquet.NewGenericWriter[Tick](file, parquet.Compression(&zstd.Codec{Level: zstd.SpeedDefault}))
+	writer := parquet.NewWriter(file, schema, parquet.Compression(&zstd.Codec{Level: zstd.SpeedDefault}))
 	if err := writer.Close(); err != nil {
 		file.Close()
 		return err
@@ -498,15 +541,15 @@ type Status struct {
 func (store *Store) Status() Status {
 	store.mutex.Lock()
 	status := Status{RunningDays: []string{}, Pending: map[string][]string{}, Failed: map[string]string{}}
-	for day := range store.runningDays {
-		status.RunningDays = append(status.RunningDays, day)
+	for pass := range store.runningDays {
+		status.RunningDays = append(status.RunningDays, pass.String())
 	}
 	sort.Strings(status.RunningDays)
-	for day, symbols := range store.pending {
+	for pass, symbols := range store.pending {
 		for symbol := range symbols {
-			status.Pending[day] = append(status.Pending[day], symbol)
+			status.Pending[pass.String()] = append(status.Pending[pass.String()], symbol)
 		}
-		sort.Strings(status.Pending[day])
+		sort.Strings(status.Pending[pass.String()])
 	}
 	for key, message := range store.failures {
 		status.Failed[key] = message

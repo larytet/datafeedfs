@@ -16,10 +16,12 @@ import (
 )
 
 // Layout:
-//   /                               symbols of the newest day, plus .status
-//   /<SYMBOL>/<YYYY-MM-DD>.parquet  tick-to-tick top of book and trades for that symbol and day
-//   /<SYMBOL>/<YYYY-MM-DD>.csv      the same as CSV
-//   /.status                        JSON: running and pending extractions, failures
+//   /tick/<SYMBOL>/<YYYY-MM-DD>.parquet       tick-to-tick best bid and ask, and trades, for that symbol and day
+//   /orderbook/<SYMBOL>/<YYYY-MM-DD>.parquet  the top orderbook.depth levels per side (config, default 5), a row whenever one changes, and trades
+//   /stream/<SYMBOL>/<YYYY-MM-DD>.parquet     every order message (add, execute, cancel, delete, replace, trade, cross), no book
+//   .../<YYYY-MM-DD>.csv                      the same as CSV
+//   /.status                                  JSON: running and pending extractions, failures
+// Each kind directory lists the symbols of the newest day.
 // Opening a file that is not cached yet triggers the extraction (Store.Request).
 
 type rootNode struct {
@@ -28,9 +30,17 @@ type rootNode struct {
 	started time.Time
 }
 
+type kindNode struct {
+	fs.Inode
+	store   *Store
+	kind    string
+	started time.Time
+}
+
 type symbolNode struct {
 	fs.Inode
 	store   *Store
+	kind    string
 	symbol  string
 	started time.Time
 }
@@ -38,6 +48,7 @@ type symbolNode struct {
 type fileNode struct {
 	fs.Inode
 	store     *Store
+	kind      string
 	symbol    string
 	day       string
 	extension string
@@ -54,6 +65,9 @@ var (
 	_ fs.NodeLookuper  = (*rootNode)(nil)
 	_ fs.NodeReaddirer = (*rootNode)(nil)
 	_ fs.NodeGetattrer = (*rootNode)(nil)
+	_ fs.NodeLookuper  = (*kindNode)(nil)
+	_ fs.NodeReaddirer = (*kindNode)(nil)
+	_ fs.NodeGetattrer = (*kindNode)(nil)
 	_ fs.NodeLookuper  = (*symbolNode)(nil)
 	_ fs.NodeReaddirer = (*symbolNode)(nil)
 	_ fs.NodeGetattrer = (*symbolNode)(nil)
@@ -101,13 +115,9 @@ func (node *rootNode) Getattr(ctx context.Context, handle fs.FileHandle, out *fu
 }
 
 func (node *rootNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	symbols, err := node.store.Symbols()
-	if err != nil {
-		return nil, syscall.EIO
-	}
 	entries := []fuse.DirEntry{{Name: ".status", Mode: syscall.S_IFREG}}
-	for _, symbol := range symbols {
-		entries = append(entries, fuse.DirEntry{Name: symbol, Mode: syscall.S_IFDIR})
+	for _, kind := range kinds {
+		entries = append(entries, fuse.DirEntry{Name: kind, Mode: syscall.S_IFDIR})
 	}
 	return fs.NewListDirStream(entries), 0
 }
@@ -118,6 +128,33 @@ func (node *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 		fileAttributes(&out.Attr, 0, node.started)
 		return node.NewInode(ctx, &statusNode{store: node.store, started: node.started}, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno("/.status")}), 0
 	}
+	if !validKind(name) {
+		return nil, syscall.ENOENT
+	}
+	directoryAttributes(&out.Attr, node.started)
+	return node.NewInode(ctx, &kindNode{store: node.store, kind: name, started: node.started}, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: stableIno("/" + name)}), 0
+}
+
+func (node *kindNode) Getattr(ctx context.Context, handle fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	directoryAttributes(&out.Attr, node.started)
+	out.SetTimeout(0)
+	return 0
+}
+
+func (node *kindNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	symbols, err := node.store.Symbols()
+	if err != nil {
+		return nil, syscall.EIO
+	}
+	entries := make([]fuse.DirEntry, 0, len(symbols))
+	for _, symbol := range symbols {
+		entries = append(entries, fuse.DirEntry{Name: symbol, Mode: syscall.S_IFDIR})
+	}
+	return fs.NewListDirStream(entries), 0
+}
+
+func (node *kindNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	noCache(out)
 	if !symbolPattern.MatchString(name) {
 		return nil, syscall.ENOENT
 	}
@@ -129,7 +166,7 @@ func (node *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 		return nil, syscall.ENOENT
 	}
 	directoryAttributes(&out.Attr, node.started)
-	return node.NewInode(ctx, &symbolNode{store: node.store, symbol: name, started: node.started}, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: stableIno("/" + name)}), 0
+	return node.NewInode(ctx, &symbolNode{store: node.store, kind: node.kind, symbol: name, started: node.started}, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: stableIno("/" + node.kind + "/" + name)}), 0
 }
 
 func (node *symbolNode) Getattr(ctx context.Context, handle fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -173,16 +210,16 @@ func (node *symbolNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 	if !found {
 		return nil, syscall.ENOENT
 	}
-	child := &fileNode{store: node.store, symbol: node.symbol, day: day, extension: extension, started: node.started}
+	child := &fileNode{store: node.store, kind: node.kind, symbol: node.symbol, day: day, extension: extension, started: node.started}
 	size, modified := child.cachedInfo()
 	fileAttributes(&out.Attr, size, modified)
-	return node.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno("/" + node.symbol + "/" + name)}), 0
+	return node.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno("/" + node.kind + "/" + node.symbol + "/" + name)}), 0
 }
 
 func (node *fileNode) cachedInfo() (int64, time.Time) {
-	path := node.store.ParquetPath(node.symbol, node.day)
+	path := node.store.ParquetPath(node.kind, node.symbol, node.day)
 	if node.extension == "csv" {
-		path = node.store.CSVPath(node.symbol, node.day)
+		path = node.store.CSVPath(node.kind, node.symbol, node.day)
 	}
 	if info, err := os.Stat(path); err == nil {
 		return info.Size(), info.ModTime()
@@ -227,17 +264,17 @@ func (node *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, ui
 	if flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0 {
 		return nil, 0, syscall.EROFS
 	}
-	future := node.store.Request(node.symbol, node.day)
+	future := node.store.Request(node.kind, node.symbol, node.day)
 	if node.store.config.Extract.OnMiss == "async" && !future.Done() {
 		return nil, 0, syscall.EAGAIN // extraction continues in the background; retry later or watch /.status
 	}
 	if _, err := future.Wait(); err != nil {
 		return nil, 0, syscall.EIO
 	}
-	path := node.store.ParquetPath(node.symbol, node.day)
+	path := node.store.ParquetPath(node.kind, node.symbol, node.day)
 	if node.extension == "csv" {
 		var err error
-		if path, err = node.store.EnsureCSV(node.symbol, node.day); err != nil {
+		if path, err = node.store.EnsureCSV(node.kind, node.symbol, node.day); err != nil {
 			return nil, 0, syscall.EIO
 		}
 	}

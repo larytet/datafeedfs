@@ -7,16 +7,28 @@ The pcap files are the output of BEAK capture traffic (the exchange feed capture
 and with a script that parses and filters the pcap stream down to the requested symbols.
 
 ```
-/                                symbols (of the newest day) and .status
-/SPY/                            one entry pair per trading day found on the ssh host
-/SPY/2026-11-20.parquet          tick-to-tick top of book and trades of SPY on that day
-/SPY/2026-11-20.csv              the same as CSV
+/tick/                           symbols (of the newest day)
+/tick/SPY/2026-11-20.parquet     tick-to-tick best bid / ask and trades of SPY on that day (one .parquet and one .csv per trading day found on the ssh host)
+/orderbook/SPY/2026-11-20.parquet  the top N price levels per side (N = `[orderbook] depth`, default 5), a row whenever one changes, and trades
+/stream/SPY/2026-11-20.parquet   every order message of the day (add, execute, cancel, delete, replace, trade, cross), no book
 /.status                         JSON: running and pending extractions, failures
 ```
 
-Each row of a file is an event in feed order: `timestamp` (exchange time as UTC), `event` (`Q` best bid/ask changed,
+Every file also exists as `.csv`. The three kinds are extracted by separate passes, so you pay for depth or for the raw stream only when you read it.
+
+**tick**: each row is an event in feed order: `timestamp` (exchange time as UTC), `event` (`Q` best bid/ask changed,
 `T` trade, `X` cross), `bid`, `bid_size`, `ask`, `ask_size` (the book at that moment, for a trade the book as it was before it),
 `trade_price`, `trade_size`, `seq` (MoldUDP64 sequence number). An empty side is `NaN` / 0.
+
+**orderbook**: the same events and `seq`, but with levels instead of the touch only: `timestamp, event, bid_1, bid_size_1, ask_1, ask_size_1, ..., bid_N, bid_size_N, ask_N, ask_size_N, trade_price, trade_size, seq`.
+Level 1 is the best price; a level that does not exist is `NaN` / 0. A `Q` row is written whenever any of the top N levels changes, so it has more rows than the tick file
+(a change below the touch is a row here and not there); join the two on `seq` (plus `event`: a trade and the book change of the same message share a `seq`).
+`depth` is set in the config (1 to 64); a different depth is a separate cache, so changing it never serves files of another depth.
+
+**stream**: the order messages as they came, for the symbol: `timestamp, event, seq, ref, new_ref, side, price, shares`.
+`event` is `A` add, `E` execute at the order's price, `C` execute at another price (`price` is the execution price), `X` cancel (`shares` cancelled), `D` delete (`shares` remaining before it),
+`U` replace (`ref` the old order, `new_ref` the new one, `price` and `shares` the new ones), `P` non-displayed trade, `Q` cross. `ref` is 0 for `P` and `Q`; `side` is `B` or `S`.
+Replaying the stream rebuilds the full book at any depth and lets you model queue position. Orders are tracked from the start of the pcap, so a pcap that starts mid-session misses the orders placed before it.
 
 ## Layout
 
@@ -27,13 +39,13 @@ parsers/   itch_tob.c (C: ITCH order-book decoder) and parse_nasdaq_itch.sh (the
 ```
 
 The pipeline of a pass is `ssh cat | xz -dc -T0 | itch_tob | datafeedfs-go ingest`: the C decoder rebuilds the order books and the Go `ingest`
-subcommand writes the parquet files.
+subcommand writes the parquet files. `itch_tob` has three output modes, selected by the parser script from `DFS_KIND`: the default (best bid and ask), `--depth N` (top N levels) and `--events` (raw order messages).
 
 ## How it works
 
 1. `ls` of the configured pcap path on the ssh host gives the trading days; the parser's `list` mode gives the symbols.
-2. Opening `/SYMBOL/DAY.parquet` that is not cached starts `ssh host cat <pcap> | parser` for that day.
-   Requests for the same day that arrive within `batch_window_seconds` are served by one pass, because a pass over a
+2. Opening `/KIND/SYMBOL/DAY.parquet` that is not cached starts `ssh host cat <pcap> | parser` for that day.
+   Requests for the same day and kind that arrive within `batch_window_seconds` are served by one pass, because a pass over a
    day costs the same for one symbol or a thousand (a full Nasdaq TotalView day is tens of GB compressed: expect one to two hours).
 3. The parser writes one parquet per symbol; they are cached under the cache directory and served from there afterwards.
    `.csv` files are rendered from the parquet on first read.
@@ -50,10 +62,11 @@ cp config.example.toml config.toml          # set ssh_host, pcap_path (the parse
 export PATH=$PWD:$PATH                            # the parser script calls `datafeedfs-go ingest`
 datafeedfs-go days config.toml
 datafeedfs-go mount config.toml ~/mnt/datafeed &
-ls ~/mnt/datafeed/SPY
-head -5 ~/mnt/datafeed/SPY/2026-11-20.csv        # the parquet file opens in any parquet reader
+ls ~/mnt/datafeed/tick/SPY
+head -5 ~/mnt/datafeed/tick/SPY/2026-11-20.csv        # the parquet file opens in any parquet reader
 fusermount -u ~/mnt/datafeed
-datafeedfs-go prefetch config.toml 2026-11-20 AAPL MSFT NVDA     # one pass for all three
+datafeedfs-go prefetch config.toml 2026-11-20 AAPL MSFT NVDA     # one pass for all three (tick files)
+datafeedfs-go prefetch --kind orderbook config.toml 2026-11-20 AAPL    # or --kind stream
 ```
 
 Requirements (without Docker): Go, FUSE (`fusermount`), `gcc` (the parser builds `parsers/itch_tob` on first use), `xz` (5.4 or newer decompresses on all cores)
@@ -99,8 +112,9 @@ and passwordless ssh from the host to the machine that stores the pcap files.
 6. **Check it**
    ```
    mountpoint ~/datafeed                # "is a mountpoint"
-   ls ~/datafeed | head                 # symbols
-   ls ~/datafeed/SPY                    # one .parquet and one .csv per trading day
+   ls ~/datafeed                        # tick  orderbook  stream
+   ls ~/datafeed/tick | head            # symbols
+   ls ~/datafeed/tick/SPY               # one .parquet and one .csv per trading day
    cat ~/datafeed/.status               # running / pending extractions and failures
    docker compose -f docker-compose.yml -f docker-compose.key.yml logs -f
    ```
@@ -108,7 +122,7 @@ and passwordless ssh from the host to the machine that stores the pcap files.
    To warm the cache, extract many symbols in one pass without mounting:
    ```
    docker compose -f docker-compose.yml -f docker-compose.key.yml run --rm datafeedfs prefetch 2026-11-20 AAPL MSFT NVDA
-   head -5 ~/datafeed/AAPL/2026-11-20.csv      # or open the .parquet in any parquet reader
+   head -5 ~/datafeed/orderbook/AAPL/2026-11-20.csv      # or open the .parquet in any parquet reader
    ```
 8. **Update to a new version**
    ```
@@ -124,7 +138,7 @@ and passwordless ssh from the host to the machine that stores the pcap files.
     docker run --rm datafeedfs-go-test
     ```
 
-One-off commands run without a mount: `docker compose ... run --rm datafeedfs days | symbols [DAY] | prefetch DAY SYMBOL...`.
+One-off commands run without a mount: `docker compose ... run --rm datafeedfs days | symbols [DAY] | prefetch [--kind tick|orderbook|stream] DAY SYMBOL...`.
 
 How it works in a container: the container needs `--device /dev/fuse`, `SYS_ADMIN` and no AppArmor / SELinux label (`docker-compose.yml` sets these). The mount reaches the host through `rshared`
 bind propagation, so the host directory must be on a shared mount (the default on systemd hosts), and the filesystem is mounted with `allow_other`. The cache is the `cache` volume (`/cache`).
@@ -165,6 +179,8 @@ Troubleshooting:
 | `DFS_DATE` | trading day `YYYY-MM-DD` |
 | `DFS_PCAP_NAME` | file name on the host, to pick the decompressor |
 | `DFS_SYMBOLS_FILE` | extract: symbols to keep, one per line |
+| `DFS_KIND` | optional: `tick` (default), `orderbook` or `stream`, see above |
+| `DFS_DEPTH` | optional: levels per side of the `orderbook` kind (default 5; datafeedfs sets it from `[orderbook] depth`) |
 | `DFS_OUT_DIR` | extract: write `<SYMBOL>/<DFS_DATE>.parquet` here (symbols with no activity: no file, served as an empty table) |
 | `DFS_PORT` | optional: decode only this UDP destination port (default: all ports in the pcap) |
 
