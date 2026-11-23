@@ -43,7 +43,7 @@ func syntheticStory() [][]byte {
 		return join(itchHeader('A', locate, nanos), be64(reference), []byte{side}, be32(shares), symbolField(symbol), be32(price))
 	}
 	return [][]byte{
-		directory(1, "AAA"), directory(2, "BBB"), directory(3, "CCC"),
+		directory(1, "AAA"), directory(2, "BBB"), directory(3, "CCC"), directory(4, "DDD"),
 		add(1, "AAA", at(1), 1, 'B', 100, 100000),
 		add(1, "AAA", at(2), 2, 'S', 200, 100500),
 		add(1, "AAA", at(3), 3, 'B', 50, 100000),
@@ -52,6 +52,12 @@ func syntheticStory() [][]byte {
 		join(itchHeader('U', 1, at(6)), be64(2), be64(4), be32(150), be32(100400)), // replace order 2
 		add(2, "BBB", at(7), 5, 'B', 10, 200000),
 		join(itchHeader('P', 1, at(8)), be64(0), []byte{'B'}, be32(25), symbolField("AAA"), be32(100200), be64(7)), // non-displayed trade
+		// DDD has two levels per side: changes below the touch are in the orderbook files but not in the tick files
+		add(4, "DDD", at(9), 10, 'B', 10, 200000),
+		add(4, "DDD", at(10), 11, 'B', 20, 199900),
+		add(4, "DDD", at(11), 12, 'S', 5, 200100),
+		add(4, "DDD", at(12), 13, 'S', 7, 200200),
+		join(itchHeader('X', 4, at(13)), be64(11), be32(5)), // cancel 5 of the 20 at the second bid level
 	}
 }
 
@@ -109,12 +115,12 @@ func sameFloat(left, right float64) bool {
 	return (math.IsNaN(left) && math.IsNaN(right)) || math.Abs(left-right) < 1e-9
 }
 
-func runParser(t *testing.T, binary, mode, outDir, symbolsFile string) string {
+func runParser(t *testing.T, binary, mode, kind, outDir, symbolsFile string) string {
 	t.Helper()
 	command := exec.Command("bash", filepath.Join("..", "parsers", "parse_nasdaq_itch.sh"))
 	command.Stdin = bytes.NewReader(syntheticPcap(7))
 	command.Env = append(os.Environ(), "DFS_MODE="+mode, "DFS_DATE=2026-11-20", "DFS_PCAP_NAME=synthetic.pcap", "DFS_SYMBOLS_FILE="+symbolsFile,
-		"DFS_OUT_DIR="+outDir, "DFS_PORT=30001", "DFS_INGEST="+binary+" ingest")
+		"DFS_OUT_DIR="+outDir, "DFS_PORT=30001", "DFS_KIND="+kind, "DFS_DEPTH=5", "DFS_INGEST="+binary+" ingest")
 	output, err := command.Output()
 	if err != nil {
 		t.Fatalf("parser (%s): %v", mode, err)
@@ -134,12 +140,12 @@ func TestParserEndToEnd(t *testing.T) {
 		t.Fatalf("go build: %v\n%s", err, output)
 	}
 	symbolsFile := filepath.Join(directory, "symbols.txt")
-	os.WriteFile(symbolsFile, []byte("AAA\nBBB\nCCC\n"), 0o644)
+	os.WriteFile(symbolsFile, []byte("AAA\nBBB\nCCC\nDDD\n"), 0o644)
 
-	if listed := strings.Fields(runParser(t, binary, "list", "", symbolsFile)); strings.Join(listed, ",") != "AAA,BBB,CCC" {
+	if listed := strings.Fields(runParser(t, binary, "list", kindTick, "", symbolsFile)); strings.Join(listed, ",") != "AAA,BBB,CCC,DDD" {
 		t.Fatalf("listed symbols %v", listed)
 	}
-	runParser(t, binary, "extract", filepath.Join(directory, "out"), symbolsFile)
+	runParser(t, binary, "extract", kindTick, filepath.Join(directory, "out"), symbolsFile)
 	ticks, err := parquet.ReadFile[Tick](filepath.Join(directory, "out", "AAA", "2026-11-20.parquet"))
 	if err != nil || len(ticks) != len(expectedAAA) {
 		t.Fatalf("AAA: %d ticks, err %v, want %d", len(ticks), err, len(expectedAAA))
@@ -157,5 +163,138 @@ func TestParserEndToEnd(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(directory, "out", "CCC")); err == nil {
 		t.Fatal("CCC has no activity and must not get a file")
+	}
+}
+
+// readTable reads every row of a parquet file of any kind: the column names and, per row, the values by column name.
+func readTable(t *testing.T, path string) ([]string, []map[string]parquet.Value) {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	info, _ := file.Stat()
+	parquetFile, err := parquet.OpenFile(file, info.Size())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, field := range parquetFile.Schema().Fields() {
+		names = append(names, field.Name())
+	}
+	reader := parquet.NewReader(parquetFile)
+	defer reader.Close()
+	var table []map[string]parquet.Value
+	batch := make([]parquet.Row, 64)
+	for {
+		count, err := reader.ReadRows(batch)
+		for _, row := range batch[:count] {
+			values := map[string]parquet.Value{}
+			for index, value := range row {
+				values[names[index]] = value.Clone()
+			}
+			table = append(table, values)
+		}
+		if err != nil {
+			break
+		}
+	}
+	return names, table
+}
+
+func TestParserOrderbookAndStream(t *testing.T) {
+	for _, tool := range []string{"gcc", "bash"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s is required", tool)
+		}
+	}
+	directory := t.TempDir()
+	binary := filepath.Join(directory, "datafeedfs-go")
+	if output, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, output)
+	}
+	symbolsFile := filepath.Join(directory, "symbols.txt")
+	os.WriteFile(symbolsFile, []byte("AAA\nBBB\nCCC\nDDD\n"), 0o644)
+	day := "2026-11-20.parquet"
+
+	// tick: DDD has two rows, the changes below the touch are not in it
+	runParser(t, binary, "extract", kindTick, filepath.Join(directory, "tick"), symbolsFile)
+	if ticks, err := parquet.ReadFile[Tick](filepath.Join(directory, "tick", "DDD", day)); err != nil || len(ticks) != 2 {
+		t.Fatalf("DDD tick rows: %d, err %v, want 2", len(ticks), err)
+	}
+
+	// orderbook: a row for every change of the top 5 levels
+	runParser(t, binary, "extract", kindOrderbook, filepath.Join(directory, "book"), symbolsFile)
+	names, rows := readTable(t, filepath.Join(directory, "book", "DDD", day))
+	if want := 2 + 4*5 + 3; len(names) != want || names[0] != "timestamp" || names[2] != "bid_1" || names[3] != "bid_size_1" || names[4] != "ask_1" || names[5] != "ask_size_1" ||
+		names[6] != "bid_2" || names[len(names)-1] != "seq" {
+		t.Fatalf("orderbook columns (%d): %v", len(names), names)
+	}
+	if len(rows) != 5 {
+		t.Fatalf("DDD orderbook rows: %d, want 5", len(rows))
+	}
+	type levels struct{ bid1, bidSize1, bid2, bidSize2, ask1, askSize1, ask2, askSize2 float64 }
+	want := []levels{
+		{20, 10, none, 0, none, 0, none, 0},
+		{20, 10, 19.99, 20, none, 0, none, 0},
+		{20, 10, 19.99, 20, 20.01, 5, none, 0},
+		{20, 10, 19.99, 20, 20.01, 5, 20.02, 7},
+		{20, 10, 19.99, 15, 20.01, 5, 20.02, 7}, // below the touch: not a tick row
+	}
+	for index, row := range rows {
+		got := levels{row["bid_1"].Double(), float64(row["bid_size_1"].Int32()), row["bid_2"].Double(), float64(row["bid_size_2"].Int32()),
+			row["ask_1"].Double(), float64(row["ask_size_1"].Int32()), row["ask_2"].Double(), float64(row["ask_size_2"].Int32())}
+		if !sameFloat(got.bid1, want[index].bid1) || got.bidSize1 != want[index].bidSize1 || !sameFloat(got.bid2, want[index].bid2) || got.bidSize2 != want[index].bidSize2 ||
+			!sameFloat(got.ask1, want[index].ask1) || got.askSize1 != want[index].askSize1 || !sameFloat(got.ask2, want[index].ask2) || got.askSize2 != want[index].askSize2 {
+			t.Errorf("DDD orderbook row %d: got %+v want %+v", index, got, want[index])
+		}
+		if row["event"].String() != "Q" || !math.IsNaN(row["bid_3"].Double()) || row["bid_size_3"].Int32() != 0 || !math.IsNaN(row["ask_5"].Double()) {
+			t.Errorf("DDD orderbook row %d: event %s, deeper levels must be NaN and 0", index, row["event"].String())
+		}
+	}
+	// AAA: the trades are in the orderbook file too, against the book as it was
+	_, aaa := readTable(t, filepath.Join(directory, "book", "AAA", day))
+	if len(aaa) != len(expectedAAA) || aaa[3]["event"].String() != "T" || aaa[3]["trade_size"].Int32() != 40 || aaa[3]["bid_size_1"].Int32() != 150 {
+		t.Fatalf("AAA orderbook rows: %d, row 3 %v", len(aaa), aaa[3])
+	}
+	csvPath := filepath.Join(directory, "DDD.csv")
+	if err := WriteCSV(filepath.Join(directory, "book", "DDD", day), csvPath); err != nil {
+		t.Fatal(err)
+	}
+	content, _ := os.ReadFile(csvPath)
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if !strings.HasPrefix(lines[0], "timestamp,event,bid_1,bid_size_1,ask_1,ask_size_1,bid_2,") || len(lines) != 6 ||
+		!strings.HasSuffix(lines[5], ",Q,20,10,20.01,5,19.99,15,20.02,7,nan,0,nan,0,nan,0,nan,0,nan,0,nan,0,nan,0,17") {
+		t.Fatalf("unexpected orderbook csv:\n%s", content)
+	}
+
+	// stream: every order message of AAA, as it came
+	runParser(t, binary, "extract", kindStream, filepath.Join(directory, "stream"), symbolsFile)
+	events, err := parquet.ReadFile[OrderEvent](filepath.Join(directory, "stream", "AAA", day))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEvents := []OrderEvent{
+		{Event: "A", Ref: 1, Side: "B", Price: 10.0, Shares: 100},
+		{Event: "A", Ref: 2, Side: "S", Price: 10.05, Shares: 200},
+		{Event: "A", Ref: 3, Side: "B", Price: 10.0, Shares: 50},
+		{Event: "E", Ref: 1, Side: "B", Price: 10.0, Shares: 40},
+		{Event: "D", Ref: 3, Side: "B", Price: 10.0, Shares: 50},
+		{Event: "U", Ref: 2, NewRef: 4, Side: "S", Price: 10.04, Shares: 150},
+		{Event: "P", Side: "B", Price: 10.02, Shares: 25},
+	}
+	if len(events) != len(wantEvents) {
+		t.Fatalf("AAA stream: %d events, want %d: %+v", len(events), len(wantEvents), events)
+	}
+	for index, want := range wantEvents {
+		got := events[index]
+		if got.Event != want.Event || got.Ref != want.Ref || got.NewRef != want.NewRef || got.Side != want.Side || !sameFloat(got.Price, want.Price) || got.Shares != want.Shares {
+			t.Errorf("AAA stream event %d: got %+v want %+v", index, got, want)
+		}
+	}
+	ddd, err := parquet.ReadFile[OrderEvent](filepath.Join(directory, "stream", "DDD", day))
+	if err != nil || len(ddd) != 5 || ddd[4].Event != "X" || ddd[4].Ref != 11 || ddd[4].Shares != 5 || ddd[4].Seq != 17 {
+		t.Fatalf("DDD stream: %+v err %v", ddd, err)
 	}
 }

@@ -15,10 +15,11 @@ import (
 
 const usage = `usage: datafeedfs-go <command>
   mount [--allow-other] CONFIG MOUNTPOINT   mount the filesystem (foreground until unmounted)
-  prefetch CONFIG DAY SYMBOL...             extract symbols for a day into the cache without mounting
+  prefetch [--kind K] CONFIG DAY SYMBOL...  extract symbols for a day into the cache without mounting; K is tick (default), orderbook or stream
   symbols CONFIG [DAY]                      print the symbols of a day (default: newest)
   days CONFIG                               print the trading days available on the ssh host
-  ingest DAY SYMBOLS_FILE OUT_DIR           parser helper: itch_tob records on stdin -> OUT_DIR/<SYMBOL>/<DAY>.parquet
+  ingest [--kind K] [--depth N] DAY SYMBOLS_FILE OUT_DIR
+                                            parser helper: itch_tob records on stdin -> OUT_DIR/<SYMBOL>/<DAY>.parquet
 `
 
 func main() {
@@ -43,10 +44,14 @@ func openStore(path string) (*Store, error) {
 func run(command string, arguments []string) error {
 	switch command {
 	case "ingest":
-		if len(arguments) != 3 {
-			return fmt.Errorf("ingest DAY SYMBOLS_FILE OUT_DIR")
+		flags := flag.NewFlagSet("ingest", flag.ExitOnError)
+		kind := flags.String("kind", kindTick, "tick, orderbook or stream")
+		depth := flags.Int("depth", defaultDepth, "orderbook: price levels per side")
+		flags.Parse(arguments)
+		if flags.NArg() != 3 {
+			return fmt.Errorf("ingest [--kind K] [--depth N] DAY SYMBOLS_FILE OUT_DIR")
 		}
-		_, _, err := Ingest(arguments[0], arguments[1], arguments[2], os.Stdin)
+		_, _, err := Ingest(flags.Arg(0), flags.Arg(1), flags.Arg(2), *kind, *depth, os.Stdin)
 		return err
 	case "days":
 		store, err := openStoreArg(arguments, 1)
@@ -74,16 +79,19 @@ func run(command string, arguments []string) error {
 		}
 		return err
 	case "prefetch":
-		if len(arguments) < 3 {
-			return fmt.Errorf("prefetch CONFIG DAY SYMBOL...")
+		flags := flag.NewFlagSet("prefetch", flag.ExitOnError)
+		kind := flags.String("kind", kindTick, "tick, orderbook or stream")
+		flags.Parse(arguments)
+		if flags.NArg() < 3 || !validKind(*kind) {
+			return fmt.Errorf("prefetch [--kind tick|orderbook|stream] CONFIG DAY SYMBOL...")
 		}
-		store, err := openStore(arguments[0])
+		store, err := openStore(flags.Arg(0))
 		if err != nil {
 			return err
 		}
 		var futures []*Future
-		for _, symbol := range arguments[2:] {
-			futures = append(futures, store.Request(symbol, arguments[1]))
+		for _, symbol := range flags.Args()[2:] {
+			futures = append(futures, store.Request(*kind, symbol, flags.Arg(1)))
 		}
 		for _, future := range futures {
 			path, err := future.Wait()

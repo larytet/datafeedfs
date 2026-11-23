@@ -1,7 +1,11 @@
 /* itch_tob: read a classic pcap on stdin carrying MoldUDP64 / Nasdaq TotalView-ITCH 5.0,
  * rebuild the order book for the chosen symbols and write one record per top-of-book change or trade.
  * Usage: xz -dc day.pcap.xz | itch_tob (--symbols SPY,QQQ | --symbols-file list.txt) --out day.bin|- [--port N] [--table-bits 22]
- *                                      [--stop-at SECONDS_SINCE_MIDNIGHT] [--stats per_symbol.csv]
+ *                                      [--stop-at SECONDS_SINCE_MIDNIGHT] [--stats per_symbol.csv] [--depth N | --events]
+ * Without --depth a record is the top of book (Record, 43 bytes) and a Q row is written when the best bid or ask changes.
+ * With --depth N (1..64) a record is a DepthHeader (27 bytes) followed by 4*N uint32: N bid levels then N ask levels, best first, each as (price, size),
+ * zero when the level does not exist; a Q row is written when any of the top N levels changes.
+ * With --events a record is an EventRecord (44 bytes): every order message of the chosen symbols as it came, no book (see EventRecord for the fields).
  *        xz -dc day.pcap.xz | itch_tob --list-symbols      prints the symbols of the day's stock directory, one per line, then stops
  * Duplicate packets (A/B feeds, retransmits) are dropped by MoldUDP64 sequence number.
  */
@@ -20,7 +24,25 @@ typedef struct {
     uint16_t sym;       /* index in the --symbols list */
     uint8_t event;      /* 'Q' top of book changed, 'T' trade, 'X' cross */
 } Record;
+typedef struct {    /* --depth: followed by 4*depth uint32, bid (px, sz) pairs best first, then ask pairs */
+    uint64_t itch_ns, seq;
+    uint32_t trade_px, trade_sz;
+    uint16_t sym;
+    uint8_t event;
+} DepthHeader;
+typedef struct {    /* --events: one order message */
+    uint64_t itch_ns, seq;
+    uint64_t ref;       /* order reference number; the old one for 'U'; 0 for 'P' and 'Q' */
+    uint64_t new_ref;   /* 'U' only: the order reference of the replacement */
+    uint32_t px;        /* 1/10000 dollar: the order's price ('A', 'E', 'X', 'D', 'U' new price), the execution price for 'C', 'P', 'Q' */
+    uint32_t shares;    /* 'A' added, 'E' executed, 'C' executed, 'X' cancelled, 'D' remaining before the delete, 'U' new size, 'P' and 'Q' traded */
+    uint16_t sym;
+    uint8_t type;       /* 'A' add, 'E' execute at the order price, 'C' execute at another price, 'X' cancel, 'D' delete, 'U' replace, 'P' non-displayed trade, 'Q' cross */
+    uint8_t side;       /* 'B', 'S', or 0 for 'Q' */
+} EventRecord;
 #pragma pack(pop)
+
+#define MAX_DEPTH 64
 
 typedef struct { uint32_t px; uint32_t qty; } Level;
 typedef struct { Level *levels; int count, capacity; } Side;
@@ -29,6 +51,7 @@ typedef struct {
     Side bid, ask;  /* bid ascending by price, ask descending, so the best level is always the last one */
     uint32_t last_bid_px, last_bid_sz, last_ask_px, last_ask_sz;
     int have_last;
+    uint32_t *last_depth;   /* --depth: the levels of the last Q row, 4*depth values */
 } Book;
 typedef struct { uint64_t ref; uint32_t px, shares; uint16_t sym; uint8_t side, used; } Order;
 
@@ -39,6 +62,8 @@ static int16_t locate_to_symbol[65536];
 static Order *table;
 static uint64_t table_mask, table_count, table_capacity;
 static int table_bits = 22;
+static int events_mode;     /* --events: EventRecord per order message, no book rows */
+static int depth;           /* 0: top-of-book Record; otherwise the number of levels per side */
 static FILE *out;
 static int list_mode, stop_requested;
 static uint64_t cur_itch_ns, cur_seq, rows_written;
@@ -121,10 +146,39 @@ static void side_sub(Side *side, uint32_t px, uint32_t qty, int ascending) {
 static inline Side *book_side(Book *book, uint8_t side) { return side == 'B' ? &book->bid : &book->ask; }
 static inline int side_ascending(uint8_t side) { return side == 'B'; }
 
+/* the top `depth` levels of both sides, best first: bid (px, qty) pairs, then ask pairs; zero where a level does not exist */
+static void fill_depth(const Book *book, uint32_t *destination) {
+    for (int k = 0; k < depth; k++) {
+        const Level *bid = k < book->bid.count ? &book->bid.levels[book->bid.count - 1 - k] : NULL;
+        const Level *ask = k < book->ask.count ? &book->ask.levels[book->ask.count - 1 - k] : NULL;
+        destination[2 * k] = bid ? bid->px : 0;
+        destination[2 * k + 1] = bid ? bid->qty : 0;
+        destination[2 * depth + 2 * k] = ask ? ask->px : 0;
+        destination[2 * depth + 2 * k + 1] = ask ? ask->qty : 0;
+    }
+}
+
+static void emit_event(uint8_t type, uint16_t sym, uint64_t ref, uint64_t new_ref, uint8_t side, uint32_t px, uint32_t shares) {
+    if (!events_mode) return;
+    EventRecord record = {cur_itch_ns, cur_seq, ref, new_ref, px, shares, sym, type, side};
+    fwrite(&record, sizeof record, 1, out);
+    rows_written++;
+}
+
 static void emit(uint8_t event, uint16_t sym, uint32_t trade_px, uint32_t trade_sz) {
+    if (events_mode) return;
     const Book *book = &books[sym];
-    Record record = {cur_itch_ns, cur_seq, 0, 0, 0, 0, trade_px, trade_sz, sym, event};
     rows_by_event[sym][event == 'Q' ? 0 : event == 'T' ? 1 : 2]++;
+    if (depth) {
+        uint32_t levels[4 * MAX_DEPTH];
+        DepthHeader header = {cur_itch_ns, cur_seq, trade_px, trade_sz, sym, event};
+        fill_depth(book, levels);
+        fwrite(&header, sizeof header, 1, out);
+        fwrite(levels, sizeof levels[0], (size_t)4 * depth, out);
+        rows_written++;
+        return;
+    }
+    Record record = {cur_itch_ns, cur_seq, 0, 0, 0, 0, trade_px, trade_sz, sym, event};
     if (book->bid.count) { record.bid_px = book->bid.levels[book->bid.count - 1].px; record.bid_sz = book->bid.levels[book->bid.count - 1].qty; }
     if (book->ask.count) { record.ask_px = book->ask.levels[book->ask.count - 1].px; record.ask_sz = book->ask.levels[book->ask.count - 1].qty; }
     fwrite(&record, sizeof record, 1, out);
@@ -132,7 +186,18 @@ static void emit(uint8_t event, uint16_t sym, uint32_t trade_px, uint32_t trade_
 }
 
 static void check_quote(uint16_t sym) {
+    if (events_mode) return;
     Book *book = &books[sym];
+    if (depth) {
+        uint32_t now[4 * MAX_DEPTH];
+        fill_depth(book, now);
+        if (book->last_depth && !memcmp(now, book->last_depth, sizeof now[0] * (size_t)4 * depth)) return;
+        if (!book->last_depth) book->last_depth = malloc(sizeof now[0] * (size_t)4 * depth);
+        if (!book->last_depth) { perror("malloc"); exit(2); }
+        memcpy(book->last_depth, now, sizeof now[0] * (size_t)4 * depth);
+        emit('Q', sym, 0, 0);
+        return;
+    }
     uint32_t bid_px = 0, bid_sz = 0, ask_px = 0, ask_sz = 0;
     if (book->bid.count) { bid_px = book->bid.levels[book->bid.count - 1].px; bid_sz = book->bid.levels[book->bid.count - 1].qty; }
     if (book->ask.count) { ask_px = book->ask.levels[book->ask.count - 1].px; ask_sz = book->ask.levels[book->ask.count - 1].qty; }
@@ -182,6 +247,7 @@ static void handle_message(const uint8_t *m, int length) {
         uint8_t side = m[19];
         uint32_t shares = be32(m + 20), px = be32(m + 32);
         order_insert(be64(m + 11), (uint16_t)sym, side, px, shares);
+        emit_event('A', (uint16_t)sym, be64(m + 11), 0, side, px, shares);
         side_add(book_side(&books[sym], side), px, shares, side_ascending(side));
         check_quote((uint16_t)sym);
         break;
@@ -191,6 +257,7 @@ static void handle_message(const uint8_t *m, int length) {
         Order *order = order_find(be64(m + 11));
         if (!order) return;
         uint32_t shares = be32(m + 19);
+        emit_event('E', order->sym, order->ref, 0, order->side, order->px, shares);
         emit('T', order->sym, order->px, shares);
         reduce_order(order, shares);
         break;
@@ -200,6 +267,7 @@ static void handle_message(const uint8_t *m, int length) {
         Order *order = order_find(be64(m + 11));
         if (!order) return;
         uint32_t shares = be32(m + 19);
+        emit_event('C', order->sym, order->ref, 0, order->side, be32(m + 32), shares);
         if (m[31] == 'Y') emit('T', order->sym, be32(m + 32), shares);
         reduce_order(order, shares);
         break;
@@ -207,13 +275,17 @@ static void handle_message(const uint8_t *m, int length) {
     case 'X': {
         if (length < 23) return;
         Order *order = order_find(be64(m + 11));
-        if (order) reduce_order(order, be32(m + 19));
+        if (!order) return;
+        emit_event('X', order->sym, order->ref, 0, order->side, order->px, be32(m + 19) > order->shares ? order->shares : be32(m + 19));
+        reduce_order(order, be32(m + 19));
         break;
     }
     case 'D': {
         if (length < 19) return;
         Order *order = order_find(be64(m + 11));
-        if (order) reduce_order(order, order->shares);
+        if (!order) return;
+        emit_event('D', order->sym, order->ref, 0, order->side, order->px, order->shares);
+        reduce_order(order, order->shares);
         break;
     }
     case 'U': {
@@ -221,6 +293,7 @@ static void handle_message(const uint8_t *m, int length) {
         Order *order = order_find(be64(m + 11));
         if (!order) return;
         uint16_t sym = order->sym; uint8_t side = order->side;
+        emit_event('U', sym, order->ref, be64(m + 19), side, be32(m + 31), be32(m + 27));
         side_sub(book_side(&books[sym], side), order->px, order->shares, side_ascending(side));
         order_erase(order);
         uint32_t shares = be32(m + 27), px = be32(m + 31);
@@ -232,6 +305,7 @@ static void handle_message(const uint8_t *m, int length) {
     case 'P': {
         int sym = locate_to_symbol[be16(m + 1)];
         if (sym < 0 || length < 44) return;
+        emit_event('P', (uint16_t)sym, 0, 0, m[19], be32(m + 32), be32(m + 20));
         emit('T', (uint16_t)sym, be32(m + 32), be32(m + 20));
         break;
     }
@@ -239,6 +313,7 @@ static void handle_message(const uint8_t *m, int length) {
         int sym = locate_to_symbol[be16(m + 1)];
         if (sym < 0 || length < 40) return;
         uint64_t shares = be64(m + 11);
+        emit_event('Q', (uint16_t)sym, 0, 0, 0, be32(m + 27), shares > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)shares);
         emit('X', (uint16_t)sym, be32(m + 27), shares > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)shares);
         break;
     }
@@ -259,8 +334,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out_path = argv[++i];
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--table-bits") && i + 1 < argc) table_bits = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--depth") && i + 1 < argc) depth = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--events")) events_mode = 1;
         else { fprintf(stderr, "bad argument %s\n", argv[i]); return 1; }
     }
+    if (depth < 0 || depth > MAX_DEPTH) { fprintf(stderr, "--depth must be between 0 and %d\n", MAX_DEPTH); return 1; }
+    if (events_mode && depth) { fprintf(stderr, "--events and --depth are exclusive\n"); return 1; }
     if (!list_mode && ((!symbols_arg && !symbols_file) || !out_path)) { fprintf(stderr, "usage: itch_tob (--symbols A,B | --symbols-file F) --out file|- [--port N]\n"); return 1; }
     if (symbols_arg) {
         char *list = strdup(symbols_arg);

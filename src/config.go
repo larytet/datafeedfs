@@ -30,11 +30,17 @@ type ExtractConfig struct {
 	WholeDay           bool    `toml:"whole_day"`            // a miss extracts every symbol of that day in the same pass: the pcap is read once per day
 }
 
+// OrderbookConfig sizes the files of /orderbook.
+type OrderbookConfig struct {
+	Depth int `toml:"depth"` // price levels per side (default 5, at most 64)
+}
+
 type Config struct {
 	Remote         RemoteConfig
 	Parser         ParserConfig
 	CacheDir       string
 	Extract        ExtractConfig
+	Orderbook      OrderbookConfig
 	DaysTTLSeconds float64
 }
 
@@ -47,8 +53,9 @@ type rawConfig struct {
 	Cache struct {
 		Dir string `toml:"dir"`
 	} `toml:"cache"`
-	Extract        ExtractConfig `toml:"extract"`
-	DaysTTLSeconds *float64      `toml:"days_ttl_seconds"`
+	Extract        ExtractConfig   `toml:"extract"`
+	Orderbook      OrderbookConfig `toml:"orderbook"`
+	DaysTTLSeconds *float64        `toml:"days_ttl_seconds"`
 }
 
 func expandHome(path string) string {
@@ -92,7 +99,7 @@ func LoadConfig(path string) (*Config, error) {
 			command[0] = candidate
 		}
 	}
-	config := &Config{Remote: raw.Remote, CacheDir: expandHome(raw.Cache.Dir), Extract: raw.Extract, DaysTTLSeconds: 600}
+	config := &Config{Remote: raw.Remote, CacheDir: expandHome(raw.Cache.Dir), Extract: raw.Extract, Orderbook: raw.Orderbook, DaysTTLSeconds: 600}
 	config.Parser = ParserConfig{Command: command, Env: map[string]string{}}
 	for key, value := range raw.Parser.Env {
 		config.Parser.Env[key] = fmt.Sprint(value)
@@ -114,6 +121,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if config.Extract.OnMiss != "block" && config.Extract.OnMiss != "async" {
 		return nil, fmt.Errorf("%s: extract.on_miss must be \"block\" or \"async\"", path)
+	}
+	if config.Orderbook.Depth == 0 {
+		config.Orderbook.Depth = defaultDepth
+	}
+	if config.Orderbook.Depth < 1 || config.Orderbook.Depth > maxDepth {
+		return nil, fmt.Errorf("%s: orderbook.depth must be between 1 and %d", path, maxDepth)
 	}
 	if raw.DaysTTLSeconds != nil {
 		config.DaysTTLSeconds = *raw.DaysTTLSeconds

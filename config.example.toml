@@ -15,6 +15,9 @@ command = "parsers/parse_nasdaq_itch.sh"
 [cache]
 dir = "~/.cache/datafeedfs"
 
+[orderbook]
+depth = 5                    # price levels per side in /orderbook (1 to 64); a different depth is a separate cache
+
 [extract]
 batch_window_seconds = 3.0   # requests for the same day inside this window share one pass over the pcap
 max_parallel = 2             # passes over different days at once

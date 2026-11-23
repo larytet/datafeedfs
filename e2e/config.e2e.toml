@@ -1,0 +1,20 @@
+# datafeedfs config of the end-to-end test: the pcap host is the sshd container (see e2e/run.sh).
+[remote]
+ssh_host = "e2e@dfs-e2e-sshd"
+pcap_path = "/data/pcaps/{yyyy}/{mm}/{dd}/nasdaq_tv.pcap.xz"
+ssh_options = ["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-i", "/root/.ssh/id_e2e", "-o", "UserKnownHostsFile=/root/.ssh/known_hosts", "-o", "StrictHostKeyChecking=yes"]
+
+[parser]
+command = "/app/parsers/parse_nasdaq_itch.sh"
+env = { DFS_PORT = "26477" }
+
+[cache]
+dir = "/cache"
+
+[orderbook]
+depth = 5
+
+[extract]
+batch_window_seconds = 1.0
+max_parallel = 2
+on_miss = "block"

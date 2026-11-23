@@ -2,12 +2,15 @@ package main
 
 import (
 	"bufio"
+	"io"
 	"math"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/parquet-go/parquet-go"
+	"github.com/parquet-go/parquet-go/format"
 )
 
 func formatFloat(value float64) string {
@@ -17,7 +20,7 @@ func formatFloat(value float64) string {
 	return strconv.FormatFloat(value, 'g', -1, 64)
 }
 
-// WriteCSV renders a per-symbol parquet file as CSV (same columns, timestamps as UTC with nanoseconds).
+// WriteCSV renders a parquet file of any kind as CSV: the same columns, timestamps as UTC with nanoseconds, NaN as "nan".
 func WriteCSV(parquetPath, csvPath string) error {
 	file, err := os.Open(parquetPath)
 	if err != nil {
@@ -32,7 +35,18 @@ func WriteCSV(parquetPath, csvPath string) error {
 	if err != nil {
 		return err
 	}
-	reader := parquet.NewGenericReader[Tick](parquetFile)
+	fields := parquetFile.Schema().Fields()
+	unsigned := make([]bool, len(fields))
+	names := make([]string, len(fields))
+	for index, field := range fields {
+		names[index] = field.Name()
+		if logical := field.Type().LogicalType(); logical != nil {
+			if integer, ok := logical.Value.(*format.IntType); ok {
+				unsigned[index] = !integer.IsSigned
+			}
+		}
+	}
+	reader := parquet.NewReader(parquetFile)
 	defer reader.Close()
 
 	temporary := csvPath + ".tmp"
@@ -42,33 +56,41 @@ func WriteCSV(parquetPath, csvPath string) error {
 	}
 	defer os.Remove(temporary)
 	writer := bufio.NewWriterSize(output, 1<<20)
-	writer.WriteString("timestamp,event,bid,bid_size,ask,ask_size,trade_price,trade_size,seq\n")
-	line := make([]byte, 0, 160)
-	batch := make([]Tick, 8192)
+	writer.WriteString(strings.Join(names, ",") + "\n")
+	line := make([]byte, 0, 512)
+	batch := make([]parquet.Row, 4096)
 	for {
-		count, readErr := reader.Read(batch)
-		for _, tick := range batch[:count] {
-			line = time.Unix(0, tick.Timestamp).UTC().AppendFormat(line[:0], "2006-01-02 15:04:05.000000000Z")
-			line = append(line, ',')
-			line = append(line, tick.Event...)
-			line = append(line, ',')
-			line = append(line, formatFloat(tick.Bid)...)
-			line = append(line, ',')
-			line = strconv.AppendInt(line, int64(tick.BidSize), 10)
-			line = append(line, ',')
-			line = append(line, formatFloat(tick.Ask)...)
-			line = append(line, ',')
-			line = strconv.AppendInt(line, int64(tick.AskSize), 10)
-			line = append(line, ',')
-			line = append(line, formatFloat(tick.TradePrice)...)
-			line = append(line, ',')
-			line = strconv.AppendInt(line, int64(tick.TradeSize), 10)
-			line = append(line, ',')
-			line = strconv.AppendUint(line, tick.Seq, 10)
+		count, readErr := reader.ReadRows(batch)
+		for _, row := range batch[:count] {
+			line = line[:0]
+			for index, value := range row {
+				if index > 0 {
+					line = append(line, ',')
+				}
+				switch {
+				case names[index] == "timestamp":
+					line = time.Unix(0, value.Int64()).UTC().AppendFormat(line, "2006-01-02 15:04:05.000000000Z")
+				case value.Kind() == parquet.Double:
+					line = append(line, formatFloat(value.Double())...)
+				case value.Kind() == parquet.Float:
+					line = append(line, formatFloat(float64(value.Float()))...)
+				case value.Kind() == parquet.ByteArray:
+					line = append(line, value.ByteArray()...)
+				case value.Kind() == parquet.Int32 && !unsigned[index]:
+					line = strconv.AppendInt(line, int64(value.Int32()), 10)
+				case unsigned[index]:
+					line = strconv.AppendUint(line, value.Uint64(), 10)
+				default:
+					line = strconv.AppendInt(line, value.Int64(), 10)
+				}
+			}
 			line = append(line, '\n')
 			writer.Write(line)
 		}
 		if readErr != nil {
+			if readErr != io.EOF {
+				return readErr
+			}
 			break
 		}
 	}

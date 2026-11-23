@@ -32,7 +32,7 @@ func TestIngestAndCSV(t *testing.T) {
 	input.Write(record(1_000, 1, 1000000, 100, 0, 0, 0, 0, 0, 'Q'))
 	input.Write(record(2_000, 2, 1000000, 100, 1005000, 200, 1002000, 25, 0, 'T'))
 	input.Write(record(3_000, 3, 2000000, 10, 0, 0, 0, 0, 1, 'Q'))
-	rows, symbols, err := Ingest("2026-11-20", symbolsFile, directory, &input)
+	rows, symbols, err := Ingest("2026-11-20", symbolsFile, directory, kindTick, 0, &input)
 	if err != nil || rows != 3 || symbols != 2 {
 		t.Fatalf("rows=%d symbols=%d err=%v", rows, symbols, err)
 	}
