@@ -51,6 +51,14 @@ subcommand writes the parquet files. `itch_tob` has three output modes, selected
    `.csv` files are rendered from the parquet on first read.
 
 While a file is not cached `ls -l` shows size 0; the mount uses `direct_io`, so readers (`cat`, parquet libraries) do not depend on the size.
+A cached file shows its real size, so **size 0 means not cached**, and a cheap, approximate inventory needs no extra tooling (`stat` does not start an extraction, only `open` does):
+
+```
+find ~/datafeed/orderbook/QQQ -name '*.parquet' -size +0     # the cached days of one symbol
+ls -ls ~/datafeed/tick/NVDA | awk '$6 > 0'                    # same with sizes, size column > 0
+```
+
+Do not run this over the whole tree: a full listing is millions of entries (symbols x days x 3 kinds). The answer can also be out of date: files evicted by the cache cap (below) show size 0 again.
 `on_miss = "async"` makes `open()` fail with `EAGAIN` instead of blocking while extraction runs in the background (watch `/.status`).
 Use `datafeedfs prefetch` to extract ahead of time, e.g. many symbols for a day in a single pass.
 
