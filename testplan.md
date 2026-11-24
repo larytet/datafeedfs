@@ -57,7 +57,7 @@ e2e/run.sh --update-golden    # rewrite e2e/golden from the current output; revi
 | 6 | headers | tick `timestamp,event,bid,bid_size,ask,ask_size,trade_price,trade_size,seq`; orderbook `timestamp,event,bid_1,bid_size_1,ask_1,ask_size_1,...,bid_5,bid_size_5,ask_5,ask_size_5,trade_price,trade_size,seq` (25 columns); stream `timestamp,event,seq,ref,new_ref,side,price,shares` |
 | 7 | golden samples: rows 1-6 and 20001-20005 of AAPL of each kind against `e2e/golden/<kind>.AAPL.sample.csv` | identical (a change in the decoder output shows up as a diff) |
 | 8 | invariants over the whole AAPL and SPY files (below) | all hold |
-| 9 | read `tick/AAPL` again | served from the cache: no new `pass over` line in the container log |
+| 9 | the config has `max_gb = 0.0093` (10 MB, below the working set of the test) with 5 s scans: read `stream/SPY` again; check the log; read `tick/AAPL` again | `stream/SPY` (most recently used) is a cache hit: no new `pass over` line. The log has a `cache: ... evicted` line. `tick/AAPL` (least recently used) was evicted: a new pass runs and its CSV is identical to the first read |
 
 Step 8 invariants:
 

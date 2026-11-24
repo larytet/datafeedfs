@@ -78,6 +78,10 @@ type Store struct {
 	symbols     []string
 	symbolSet   map[string]bool
 	csvMutex    sync.Mutex
+
+	touchMutex sync.Mutex
+	touched    map[string]time.Time // path -> last access-time bump, so a hot file costs one metadata write per touch interval
+	evictPause time.Duration        // pause between batches of deletions
 }
 
 func NewStore(config *Config) (*Store, error) {
@@ -85,6 +89,7 @@ func NewStore(config *Config) (*Store, error) {
 		config: config, cache: config.CacheDir,
 		pending: map[passKey]map[string]*Future{}, firstRequest: map[passKey]time.Time{}, inflight: map[fileKey]*Future{},
 		runningDays: map[passKey]bool{}, failures: map[string]string{}, wake: make(chan struct{}, 1),
+		touched: map[string]time.Time{}, evictPause: 2 * time.Second,
 	}
 	for _, name := range []string{"_symbols", "_logs", "_work"} {
 		if err := os.MkdirAll(filepath.Join(store.cache, name), 0o755); err != nil {
@@ -95,6 +100,9 @@ func NewStore(config *Config) (*Store, error) {
 		return nil, err
 	}
 	go store.scheduler()
+	if config.Cache.MaxGB > 0 {
+		go store.evictLoop()
+	}
 	return store, nil
 }
 
@@ -322,6 +330,8 @@ func (store *Store) EnsureCSV(kind, symbol, day string) (string, error) {
 		if err := WriteCSV(store.ParquetPath(kind, symbol, day), target); err != nil {
 			return "", err
 		}
+	} else {
+		store.touch(target)
 	}
 	return target, nil
 }
@@ -339,6 +349,7 @@ func (store *Store) Request(kind, symbol, day string) *Future {
 	}
 	future := newFuture()
 	if _, err := os.Stat(path); err == nil {
+		store.touch(path)
 		future.resolve(path, nil)
 		return future
 	}

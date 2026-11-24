@@ -169,6 +169,17 @@ Troubleshooting:
 - I/O: every pass reads the whole compressed pcap over ssh from the host (tens of GB for Nasdaq), so several passes share the host's disk, network and its single `sshd` encryption core.
   Raising `max_parallel` helps until that, or the CPU of the machine running the container, becomes the limit.
 
+## Cache size cap (LRU eviction)
+
+By default the cache grows without bound. Set `[cache] max_gb` to cap the parquet and csv files (the `_work`, `_logs` and `_symbols` directories are not counted). Eviction is lazy so that reads never churn the disk:
+
+- A read bumps the file's mtime, at most once per `touch_interval_seconds` (default 3600) per file; there is no other bookkeeping on the read path.
+- A background pass runs every `scan_interval_seconds` (default 600) and does nothing while the cache is under `max_gb`.
+- Over the cap it deletes the least recently used files, 50 at a time with a pause between batches, down to `evict_to` times the cap (default 0.9). The gap is hysteresis: the next passes find nothing to do until the cache has grown by it again.
+- The cache can therefore exceed the cap by what is written between passes. Leave headroom on the disk (the cap is not a quota).
+- Never evicted: files used in the last hour (`min_age_seconds`, never below the touch interval) and files under 16 KiB. The latter are the empty tables that mark a day as extracted; deleting one would cost a whole pass over the pcap.
+- An evicted file is simply a cache miss: the next read extracts it again, which costs a pass over that day's pcap, not just that file.
+
 ## Parser contract
 
 `[parser] command` is run once per pass with the pcap, exactly as stored on the host, on stdin, and these environment variables:

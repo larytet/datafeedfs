@@ -35,10 +35,22 @@ type OrderbookConfig struct {
 	Depth int `toml:"depth"` // price levels per side (default 5, at most 64)
 }
 
+// CacheConfig bounds the cache. Eviction is lazy on purpose: access times are recorded at most once per TouchIntervalSeconds
+// per file, a background scan runs every ScanIntervalSeconds, and nothing is deleted until the cache is over MaxGB, after which it is
+// trimmed to EvictTo*MaxGB in small batches. So the cache can exceed the cap a little, and reads cost no disk writes in between.
+type CacheConfig struct {
+	MaxGB                float64 `toml:"max_gb"`                 // size cap of the parquet and csv files; 0 = unlimited (no eviction)
+	EvictTo              float64 `toml:"evict_to"`               // once over the cap, delete down to this fraction of it (default 0.9)
+	ScanIntervalSeconds  float64 `toml:"scan_interval_seconds"`  // how often the cache size is checked (default 600)
+	TouchIntervalSeconds float64 `toml:"touch_interval_seconds"` // a file's access time is bumped at most this often (default 3600)
+	MinAgeSeconds        float64 `toml:"min_age_seconds"`        // files used more recently than this are never evicted (default and floor: touch interval)
+}
+
 type Config struct {
 	Remote         RemoteConfig
 	Parser         ParserConfig
 	CacheDir       string
+	Cache          CacheConfig
 	Extract        ExtractConfig
 	Orderbook      OrderbookConfig
 	DaysTTLSeconds float64
@@ -52,6 +64,7 @@ type rawConfig struct {
 	} `toml:"parser"`
 	Cache struct {
 		Dir string `toml:"dir"`
+		CacheConfig
 	} `toml:"cache"`
 	Extract        ExtractConfig   `toml:"extract"`
 	Orderbook      OrderbookConfig `toml:"orderbook"`
@@ -100,6 +113,7 @@ func LoadConfig(path string) (*Config, error) {
 		}
 	}
 	config := &Config{Remote: raw.Remote, CacheDir: expandHome(raw.Cache.Dir), Extract: raw.Extract, Orderbook: raw.Orderbook, DaysTTLSeconds: 600}
+	config.Cache = raw.Cache.CacheConfig
 	config.Parser = ParserConfig{Command: command, Env: map[string]string{}}
 	for key, value := range raw.Parser.Env {
 		config.Parser.Env[key] = fmt.Sprint(value)
@@ -128,6 +142,9 @@ func LoadConfig(path string) (*Config, error) {
 	if config.Orderbook.Depth < 1 || config.Orderbook.Depth > maxDepth {
 		return nil, fmt.Errorf("%s: orderbook.depth must be between 1 and %d", path, maxDepth)
 	}
+	if err := config.Cache.normalize(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
 	if raw.DaysTTLSeconds != nil {
 		config.DaysTTLSeconds = *raw.DaysTTLSeconds
 	}
@@ -149,4 +166,29 @@ func (config *Config) DayRegex() *regexp.Regexp {
 		pattern = strings.Replace(pattern, regexp.QuoteMeta("{"+name+"}"), fmt.Sprintf("(?P<%s>[0-9]{%d})", name, digits), 1)
 	}
 	return regexp.MustCompile("^" + pattern + "$")
+}
+
+func (cache *CacheConfig) normalize() error {
+	if cache.MaxGB < 0 {
+		return fmt.Errorf("cache.max_gb must not be negative")
+	}
+	if cache.EvictTo == 0 {
+		cache.EvictTo = 0.9
+	}
+	if cache.EvictTo <= 0 || cache.EvictTo > 1 {
+		return fmt.Errorf("cache.evict_to must be in (0, 1]")
+	}
+	if cache.ScanIntervalSeconds == 0 {
+		cache.ScanIntervalSeconds = 600
+	}
+	if cache.TouchIntervalSeconds == 0 {
+		cache.TouchIntervalSeconds = 3600
+	}
+	if cache.ScanIntervalSeconds < 0 || cache.TouchIntervalSeconds < 0 || cache.MinAgeSeconds < 0 {
+		return fmt.Errorf("cache intervals must not be negative")
+	}
+	if cache.MinAgeSeconds < cache.TouchIntervalSeconds {
+		cache.MinAgeSeconds = cache.TouchIntervalSeconds // a file read inside the touch window must not look idle
+	}
+	return nil
 }

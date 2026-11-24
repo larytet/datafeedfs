@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"hash/fnv"
 	"io"
 	"os"
@@ -264,25 +265,30 @@ func (node *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, ui
 	if flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0 {
 		return nil, 0, syscall.EROFS
 	}
-	future := node.store.Request(node.kind, node.symbol, node.day)
-	if node.store.config.Extract.OnMiss == "async" && !future.Done() {
-		return nil, 0, syscall.EAGAIN // extraction continues in the background; retry later or watch /.status
-	}
-	if _, err := future.Wait(); err != nil {
-		return nil, 0, syscall.EIO
-	}
-	path := node.store.ParquetPath(node.kind, node.symbol, node.day)
-	if node.extension == "csv" {
-		var err error
-		if path, err = node.store.EnsureCSV(node.kind, node.symbol, node.day); err != nil {
+	for attempt := 0; ; attempt++ {
+		future := node.store.Request(node.kind, node.symbol, node.day)
+		if node.store.config.Extract.OnMiss == "async" && !future.Done() {
+			return nil, 0, syscall.EAGAIN // extraction continues in the background; retry later or watch /.status
+		}
+		if _, err := future.Wait(); err != nil {
 			return nil, 0, syscall.EIO
 		}
+		path := node.store.ParquetPath(node.kind, node.symbol, node.day)
+		if node.extension == "csv" {
+			var err error
+			if path, err = node.store.EnsureCSV(node.kind, node.symbol, node.day); err != nil {
+				return nil, 0, syscall.EIO
+			}
+		}
+		file, err := os.Open(path)
+		if errors.Is(err, os.ErrNotExist) && attempt == 0 {
+			continue // evicted between the lookup and the open: request it again
+		}
+		if err != nil {
+			return nil, 0, syscall.EIO
+		}
+		return &fileHandle{file: file}, fuse.FOPEN_DIRECT_IO, 0
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, 0, syscall.EIO
-	}
-	return &fileHandle{file: file}, fuse.FOPEN_DIRECT_IO, 0
 }
 
 // ----- /.status --------------------------------------------------------------------------------------------------------------

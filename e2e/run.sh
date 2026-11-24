@@ -138,11 +138,20 @@ for symbol in AAPL SPY; do
     [ "${result% *}" = "0" ] && pass "$symbol every tick trade or cross is an execution, trade or cross of the stream (${result#* } rows)" || fail "$symbol tick trades vs stream: $result"
 done
 
-step "9. a second read is served from the cache"
+step "9. the cache cap (config: 10 MB, below the working set of this test): LRU eviction"
+# the most recently used file is still cached: reading it again starts no pass
 before=$(docker logs "$APP" 2>&1 | grep -c "pass over" || true)
-mounted "tick/AAPL/$DAY.csv" >/dev/null
+mounted "stream/SPY/$DAY.csv" >/dev/null
 after=$(docker logs "$APP" 2>&1 | grep -c "pass over" || true)
-[ "$before" = "$after" ] && pass "no new pass over the capture" || fail "a cached file started a new pass"
+[ "$before" = "$after" ] && pass "the most recently used file is served from the cache: no new pass over the capture" || fail "a cached file started a new pass"
+# the eviction loop ran and trimmed the cache to the cap (it may exceed it by what was written since the last scan)
+docker logs "$APP" 2>&1 | grep -q "cache: .* evicted" && pass "eviction ran: $(docker logs "$APP" 2>&1 | grep -c 'cache: .* evicted') time(s)" || fail "nothing was evicted although the cache is over its cap"
+# the least recently used file (tick/AAPL, read first) was evicted: reading it extracts it again, with the same content
+before=$(docker logs "$APP" 2>&1 | grep -c "pass over" || true)
+mounted "tick/AAPL/$DAY.csv" > "$WORK/tick.AAPL.again.csv"
+after=$(docker logs "$APP" 2>&1 | grep -c "pass over" || true)
+[ "$after" -gt "$before" ] && pass "the least recently used file was evicted and is extracted again" || fail "tick/AAPL was not evicted"
+cmp -s "$WORK/tick.AAPL.csv" "$WORK/tick.AAPL.again.csv" && pass "the re-extracted file is identical" || fail "the re-extracted tick/AAPL differs"
 
 echo
 if [ "$failures" -eq 0 ]; then echo "e2e: all checks passed"; else echo "e2e: $failures check(s) FAILED" >&2; docker logs "$APP" 2>&1 | tail -20 >&2; exit 1; fi

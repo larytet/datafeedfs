@@ -13,6 +13,13 @@ command = "/app/parsers/parse_nasdaq_itch.sh"
 
 [cache]
 dir = "/cache"
+# Cache cap with lazy LRU eviction (0 or absent = unlimited). Reads bump a file's mtime at most once an hour; every 10 minutes the
+# cache is measured and, only when over max_gb, the least recently used files are deleted in small batches down to evict_to*max_gb.
+# Files used in the last hour and empty-table markers are never evicted. Leave headroom on the disk: the cache can exceed the cap a little.
+# max_gb = 80
+# evict_to = 0.9
+# scan_interval_seconds = 600
+# touch_interval_seconds = 3600
 
 [orderbook]
 depth = 5                    # price levels per side in /orderbook (1 to 64); a different depth is a separate cache

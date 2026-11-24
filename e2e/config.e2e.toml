@@ -10,6 +10,10 @@ env = { DFS_PORT = "26477" }
 
 [cache]
 dir = "/cache"
+# a 10 MB cap with short intervals, so the eviction loop runs during the test
+max_gb = 0.0093
+scan_interval_seconds = 5
+touch_interval_seconds = 1
 
 [orderbook]
 depth = 5
