@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -212,5 +215,63 @@ func TestUITokenAndHostChecks(t *testing.T) {
 	}
 	if status, _ := open.call("GET", "/api/status", nil, map[string]string{"Host": "localhost:8088"}); status != 200 {
 		t.Errorf("localhost Host: %d", status)
+	}
+}
+
+// A process that lives for well under one sample step must still show up in the CPU by group (this was missed when only two readings
+// 10 s apart were compared).
+func TestSamplerCountsShortLivedProcesses(t *testing.T) {
+	if _, err := os.Stat("/proc/stat"); err != nil {
+		t.Skip("needs /proc")
+	}
+	shell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("needs sh")
+	}
+	data, err := os.ReadFile(shell)
+	if err != nil {
+		t.Skip(err)
+	}
+	xz := filepath.Join(t.TempDir(), "xz") // the process name (comm) is the file name, which is what the sampler groups by
+	if err := os.WriteFile(xz, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, _ := newTestStore(t, "")
+	sampler := &Sampler{store: store}
+	sampler.host.CPUs = runtime.NumCPU()
+	sampler.poll()
+	sampler.sample() // baseline
+	command := exec.Command(xz, "-c", "i=0; while [ $i -lt 400000 ]; do i=$((i+1)); done")
+	if err := command.Start(); err != nil {
+		t.Skip("cannot run the copied shell: ", err)
+	}
+	done := make(chan struct{})
+	go func() { command.Wait(); close(done) }()
+	for running := true; running; {
+		select {
+		case <-done:
+			running = false
+		default:
+			sampler.poll()
+			time.Sleep(40 * time.Millisecond)
+		}
+	}
+	sampler.poll()
+	time.Sleep(200 * time.Millisecond)
+	sampler.sample()
+	samples, processes, _ := sampler.Snapshot()
+	if len(samples) == 0 {
+		t.Fatal("no sample")
+	}
+	last := samples[len(samples)-1]
+	if last.Groups["xz"] <= 0.01 {
+		t.Fatalf("the short-lived xz process was not counted: groups %v", last.Groups)
+	}
+	found := false
+	for _, process := range processes {
+		found = found || process.Name == "xz"
+	}
+	if !found {
+		t.Errorf("xz is missing from the busiest processes: %v", processes)
 	}
 }

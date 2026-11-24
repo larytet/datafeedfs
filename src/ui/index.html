@@ -582,14 +582,14 @@ $('tab-status').parentNode.addEventListener('keydown',function(e){var i=TABS.ind
 
 /* ---------- charts ---------- */
 function nice(max){var p=Math.pow(10,Math.floor(Math.log10(max||1))),m=max/p;return(m<=2?2:m<=4?4:m<=8?8:10)*p}
-function fmt(v){return v>=10||v===Math.floor(v)?v.toFixed(0):v.toFixed(1)}
+function fmt(v){return v>=10||v===Math.floor(v)?v.toFixed(0):v<1?v.toFixed(2):v.toFixed(1)}
 function spanLabel(t){if(!t||t.length<2)return '';var s=Math.round((t[t.length-1]-t[0])/1000);return s>=3600?'-'+Math.round(s/60)+'m':s>=90?'-'+Math.round(s/60)+'m':'-'+s+'s'}
 function plot(el,o){
   var w=Math.max(260,el.clientWidth),h=el.clientHeight||190,L=40,Rr=10,T=10,B=22,iw=w-L-Rr,ih=h-T-B,series=o.series,n=series[0].length;
   if(!n){el.innerHTML='<div class="empty" style="padding:70px 0;text-align:center">Collecting samples… the first point appears after about 20 seconds.</div>';return}
   var flat=[].concat.apply([],series).filter(function(v){return v!=null});
   var tops=o.stack?series[0].map(function(_,i){return series.reduce(function(a,s){return a+(s[i]||0)},0)}):flat;
-  var ymax=o.yMax||nice(Math.max.apply(null,tops.concat([o.ref||0,0.0001]))*1.08);
+  var ymax=o.yMax||nice(Math.max.apply(null,tops.concat([o.ref||0,o.minMax||0.0001]))*1.08);
   var X=function(i){return L+(n>1?i*iw/(n-1):iw/2)},Y=function(v){return T+ih-Math.min(v,ymax)/ymax*ih};
   var svg='<svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="'+esc(o.label)+'">';
   for(var k=0;k<=4;k++){var yv=ymax*k/4,y=Y(yv);svg+='<line class="grid" x1="'+L+'" x2="'+(w-Rr)+'" y1="'+y+'" y2="'+y+'"/><text x="'+(L-6)+'" y="'+(y+3.5)+'" text-anchor="end">'+fmt(yv)+'</text>'}
@@ -615,17 +615,17 @@ function bars(el,vals,colors,labels,unit){
 }
 function stats(a){a=a.filter(function(v){return v!=null});if(!a.length)return null;var s=a.slice().sort(function(x,y){return x-y});return{avg:a.reduce(function(x,y){return x+y},0)/a.length,p95:s[Math.min(s.length-1,Math.floor(s.length*.95))],max:s[s.length-1],min:s[0],last:a[a.length-1]}}
 var GROUPS=['xz','itch_tob','datafeedfs-go','ssh','other'];
-$('lg-cpu').innerHTML=GROUPS.map(function(g,i){return '<span><i style="background:var(--c'+(i+1)+')"></i>'+g+'</span>'}).join('');
+$('lg-cpu').innerHTML=GROUPS.map(function(g,i){return '<span><i style="background:var(--c'+(i+1)+')"></i>'+(g==='other'?'other (the rest of the host)':g)+'</span>'}).join('');
 function drawCharts(){
   if(!MT||(S.tab!=='performance'&&S.tab!=='load'))return;
   var sp=spanLabel(MT.t),when='Updated '+clock(Date.now())+(S.paused?' · paused':'');
   $('unsup-p').hidden=$('unsup-l').hidden=MT.host.supported;
   if(S.tab==='performance'){
-    plot($('c-net'),{series:[MT.net_mbs],label:'Network received, MB/s',span:sp});
+    plot($('c-net'),{series:[MT.net_mbs],minMax:1,label:'Network received, MB/s',span:sp});
     plot($('c-hit'),{series:[MT.hit_ratio],yMax:100,label:'Cache hit ratio, percent',span:sp,colors:[2]});
-    plot($('c-dsk'),{series:[MT.cache_write_mbs],label:'Cache writes, MB/s',span:sp,colors:[3]});
+    plot($('c-dsk'),{series:[MT.cache_write_mbs],minMax:1,label:'Cache writes, MB/s',span:sp,colors:[3]});
     var a=stats(MT.net_mbs),b=stats(MT.hit_ratio),c=stats(MT.cache_write_mbs);
-    $('now-net').textContent=a?a.last.toFixed(1)+' MB/s':'';$('st-net').textContent=a?'avg '+a.avg.toFixed(1)+' · p95 '+a.p95.toFixed(1)+' · min '+a.min.toFixed(1)+' MB/s ('+(a.last*8/1000).toFixed(2)+' Gbit/s now)':'';
+    $('now-net').textContent=a?a.last.toFixed(1)+' MB/s':'';var local=ST&&ST.mount.source==='this machine';$('st-net').textContent=a?(a.max<0.005?'No network traffic in this window.'+(local?' The pcap is read from this machine, not over ssh.':''):'avg '+a.avg.toFixed(1)+' · p95 '+a.p95.toFixed(1)+' · min '+a.min.toFixed(1)+' MB/s ('+(a.last*8/1000).toFixed(2)+' Gbit/s now)'):'';
     $('now-hit').textContent=b?b.last.toFixed(0)+' %':'no reads yet';$('st-hit').textContent=b?'avg '+b.avg.toFixed(0)+' % · min '+b.min.toFixed(0)+' % (reads served without a pass; gaps have no reads)':'Reads served from the cache divided by all reads; gaps are intervals with no reads.';
     $('now-dsk').textContent=c?c.last.toFixed(1)+' MB/s':'';$('st-dsk').textContent=c?'avg '+c.avg.toFixed(1)+' · p95 '+c.p95.toFixed(1)+' MB/s of parquet moved into the cache':'';
     var passes=MT.passes.slice().reverse(),max=passes.reduce(function(m,p){return Math.max(m,p.seconds)},0),minutes=max>=120,unit=minutes?'min':'s';

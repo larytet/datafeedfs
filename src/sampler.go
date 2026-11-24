@@ -67,9 +67,23 @@ type Sampler struct {
 		busy, total           uint64
 		netRx                 uint64
 		written, hits, misses int64
-		cpu                   map[int]uint64 // pid -> utime+stime
 	}
+
+	// Per-process CPU is accumulated by poll every second, so a process that lives for two seconds is still counted in the 10 s sample
+	// (comparing two readings 10 s apart would never see it).
+	accMutex  sync.Mutex
+	prevCPU   map[int]uint64 // pid -> utime+stime at the last poll; nil before the first poll
+	accGroups map[string]float64
+	accProcs  map[int]*procAcc
 }
+
+type procAcc struct {
+	name, command string
+	seconds       float64
+	rssBytes      float64
+}
+
+const pollStep = time.Second
 
 func newSampler(store *Store) *Sampler {
 	sampler := &Sampler{store: store}
@@ -79,9 +93,68 @@ func newSampler(store *Store) *Sampler {
 }
 
 func (sampler *Sampler) run() {
+	sampler.poll()
 	sampler.sample()
+	go func() {
+		for range time.Tick(pollStep) {
+			sampler.poll()
+		}
+	}()
 	for range time.Tick(sampleStep) {
 		sampler.sample()
+	}
+}
+
+func groupOf(name string) string {
+	for _, group := range groupNames {
+		if strings.HasPrefix(name, group) {
+			return group
+		}
+	}
+	return ""
+}
+
+// poll adds the CPU time every process used since the previous poll to the accumulators. A process first seen now started since the
+// previous poll, so all of its CPU time is new; a process that exited between two polls loses at most its last second.
+func (sampler *Sampler) poll() {
+	processes := processTimes()
+	sampler.accMutex.Lock()
+	defer sampler.accMutex.Unlock()
+	if sampler.accGroups == nil {
+		sampler.accGroups, sampler.accProcs = map[string]float64{}, map[int]*procAcc{}
+	}
+	if sampler.prevCPU != nil {
+		for pid, info := range processes {
+			delta := info.cpu
+			if before, seen := sampler.prevCPU[pid]; seen {
+				if info.cpu < before {
+					continue
+				}
+				delta = info.cpu - before
+			}
+			if delta == 0 {
+				continue
+			}
+			seconds := float64(delta) / clockTicks
+			if group := groupOf(info.name); group != "" {
+				sampler.accGroups[group] += seconds
+			}
+			entry := sampler.accProcs[pid]
+			if entry == nil {
+				command := strings.ReplaceAll(strings.TrimSpace(string(readProc("/proc/"+strconv.Itoa(pid)+"/cmdline"))), "\x00", " ")
+				if len(command) > 70 {
+					command = command[:70]
+				}
+				entry = &procAcc{name: info.name, command: command}
+				sampler.accProcs[pid] = entry
+			}
+			entry.seconds += seconds
+			entry.rssBytes = float64(info.rss) * float64(os.Getpagesize())
+		}
+	}
+	sampler.prevCPU = make(map[int]uint64, len(processes))
+	for pid, info := range processes {
+		sampler.prevCPU[pid] = info.cpu
 	}
 }
 
@@ -192,7 +265,6 @@ func (sampler *Sampler) sample() {
 	busy, total, supported := cpuTimes()
 	netRx := netReceived()
 	totalGiB, usedGiB := memory()
-	processes := processTimes()
 	written, hits, misses := sampler.store.counters.written.Load(), sampler.store.counters.hits.Load(), sampler.store.counters.misses.Load()
 	load := strings.Fields(string(readProc("/proc/loadavg")))
 
@@ -206,10 +278,10 @@ func (sampler *Sampler) sample() {
 	previous := sampler.last
 	sampler.last.at, sampler.last.busy, sampler.last.total, sampler.last.netRx = now, busy, total, netRx
 	sampler.last.written, sampler.last.hits, sampler.last.misses = written, hits, misses
-	sampler.last.cpu = make(map[int]uint64, len(processes))
-	for pid, info := range processes {
-		sampler.last.cpu[pid] = info.cpu
-	}
+	sampler.accMutex.Lock()
+	groupSeconds, procs := sampler.accGroups, sampler.accProcs
+	sampler.accGroups, sampler.accProcs = map[string]float64{}, map[int]*procAcc{}
+	sampler.accMutex.Unlock()
 	if previous.at.IsZero() {
 		return // rates need two readings
 	}
@@ -233,45 +305,26 @@ func (sampler *Sampler) sample() {
 	}
 	sample.MemUsedGiB = usedGiB
 
-	var top []ProcessInfo
 	named := 0.0
-	for pid, info := range processes {
-		before, seen := previous.cpu[pid]
-		if !seen || info.cpu < before {
-			continue
-		}
-		cores := float64(info.cpu-before) / clockTicks / elapsed
-		group := info.name
-		for _, name := range groupNames {
-			if strings.HasPrefix(info.name, name) {
-				group = name
-			}
-		}
-		for _, name := range groupNames {
-			if group == name {
-				sample.Groups[name] += cores
-				named += cores
-			}
-		}
-		if cores > 0.01 {
-			top = append(top, ProcessInfo{PID: pid, Name: info.name, CPU: cores, RSSMB: float64(info.rss) * float64(os.Getpagesize()) / 1e6})
-		}
+	for _, group := range groupNames {
+		cores := groupSeconds[group] / elapsed
+		sample.Groups[group] = cores
+		named += cores
 	}
 	other := sample.CPUCores - named
 	if other < 0 {
 		other = 0
 	}
 	sample.Groups["other"] = other
+	var top []ProcessInfo
+	for pid, entry := range procs {
+		if cores := entry.seconds / elapsed; cores > 0.005 {
+			top = append(top, ProcessInfo{PID: pid, Name: entry.name, Command: entry.command, CPU: cores, RSSMB: entry.rssBytes / 1e6})
+		}
+	}
 	sort.Slice(top, func(i, j int) bool { return top[i].CPU > top[j].CPU })
 	if len(top) > 8 {
 		top = top[:8]
-	}
-	for i := range top {
-		command := strings.ReplaceAll(strings.TrimSpace(string(readProc("/proc/"+strconv.Itoa(top[i].PID)+"/cmdline"))), "\x00", " ")
-		if len(command) > 70 {
-			command = command[:70]
-		}
-		top[i].Command = command
 	}
 	sampler.processes = top
 	sampler.samples = append(sampler.samples, sample)

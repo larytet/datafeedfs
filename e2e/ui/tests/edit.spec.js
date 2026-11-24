@@ -61,12 +61,20 @@ test('the performance tab draws charts and lists the finished pass', async ({ pa
     await expect(page.getByTestId('done')).toContainText('ok');
     await expect(page.locator('#now-hit')).toContainText('%', { timeout: 45_000 });
   }
+  // an idle chart still has a readable axis: not a column of zeros (the host may have little or no network traffic)
+  const ticks = await page.getByTestId('chart-net').locator('svg text').allTextContents();
+  expect(ticks.filter((label) => /^[1-9]/.test(label.trim())).length).toBeGreaterThan(0);
+  await expect(page.locator('#st-net')).toContainText(/No network traffic|avg /); // either the explanation or the figures, depending on the host's traffic
   await page.getByRole('button', { name: '5 min' }).first().click();
   await expect(page.getByRole('button', { name: '5 min' }).first()).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: '15 min' }).first()).toHaveAttribute('aria-pressed', 'false');
 });
 
-test('the load tab shows the host, CPU by group, slots and processes', async ({ page }) => {
+test('the load tab shows the host, CPU by group, slots and processes', async ({ page, request }) => {
+  if (state.mounted) {
+    // the pass above lived about 2 s: its xz and decoder processes must still be counted in their own groups, not lumped into "other"
+    await expect.poll(async () => Math.max(0, ...(await (await request.get('/api/metrics?range=15m')).json()).cpu.xz), { timeout: 45_000 }).toBeGreaterThan(0);
+  }
   await page.goto('/#load');
   await expect(page.locator('#l-cpus')).toHaveText(/^\d+$/, { timeout: 30_000 });
   await expect(page.getByTestId('chart-cpu').locator('svg path.area')).not.toHaveCount(0, { timeout: 45_000 });

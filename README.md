@@ -211,7 +211,7 @@ A saved config takes effect only after a restart: the page shows a banner while 
 
 Security: whoever can save the config can change `parser.command`, which the process runs. That is why editing is off by default, the default bind is loopback, a token is required off loopback, writes need an `X-Requested-With` header and a same-origin `Origin`, and without a token only `localhost` Host names are served (DNS rebinding). Keep `allow_edit` off unless you trust everyone who can reach the port.
 
-The page reads a small JSON API: `GET /api/status`, `/api/metrics?range=5m|15m|1h`, `/api/config`, `POST /api/config/validate`, `PUT /api/config`, `POST /api/restart`. Host figures (CPU, load, memory, network received) are read from `/proc` every 10 seconds and kept for an hour; on other platforms they are empty. In a container the CPU, load and memory are the host's and the network and processes are the container's. `?refresh=<seconds>` changes the 3 second poll interval.
+The page reads a small JSON API: `GET /api/status`, `/api/metrics?range=5m|15m|1h`, `/api/config`, `POST /api/config/validate`, `PUT /api/config`, `POST /api/restart`. Host figures (CPU, load, memory, network received) are read from `/proc` every 10 seconds and kept for an hour; process CPU is polled every second so short-lived processes (a pass over a small pcap) are still counted in their group. "other" is the rest of the host's CPU, including software outside the container. On other platforms the figures are empty. In a container the CPU, load and memory are the host's and the network and processes are the container's. `?refresh=<seconds>` changes the 3 second poll interval.
 
 ## OpenTelemetry
 
