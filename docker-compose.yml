@@ -33,5 +33,9 @@ services:
       - ${DFS_KNOWN_HOSTS:-${HOME}/.ssh/known_hosts}:/root/.ssh/known_hosts:ro
       - cache:/cache
     stop_grace_period: 20s
+    # Web console: set [ui] listen = "0.0.0.0:8088" and a token in config.toml, publish the port, and drop the :ro of the config mount above if
+    # the console should save the config (the console is described in the README).
+    # ports:
+    #   - "127.0.0.1:8088:8088"
 volumes:
   cache:

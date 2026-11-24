@@ -1,0 +1,719 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>datafeedfs console</title>
+<link rel="icon" href="data:,">
+<style>
+:root{color-scheme:light}
+
+/* Layout: sticky header with the mount state and tabs; one working surface below. Operator console for a FUSE mount, so state is shown as pills, bars and sparklines before prose. */
+:root{
+  --bg:#f3f5f9; --surface:#ffffff; --surface-2:#eaeef5; --line:#d5dbe6; --fg:#141a26; --muted:#566175;
+  --accent:#2757d8; --accent-ink:#ffffff; --accent-soft:#e3ebfd;
+  --good:#1a7f4b; --warn:#9a5b00; --bad:#c0342b; --good-soft:#dff3e8; --warn-soft:#fbefd6; --bad-soft:#fbe3e0;
+  --c1:#2757d8; --c2:#0e8f86; --c3:#7a4fd6; --c4:#d9731a; --c5:#7b8799;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif; --mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0e131c; --surface:#151b27; --surface-2:#1d2533; --line:#2a3446; --fg:#e6eaf2; --muted:#97a3b6;
+  --accent:#7aa2ff; --accent-ink:#0b1220; --accent-soft:#1c2a4a;
+  --good:#52c88a; --warn:#e0a23a; --bad:#ff7a70; --good-soft:#143323; --warn-soft:#3a2a0e; --bad-soft:#3d1a17;
+  --c1:#7aa2ff; --c2:#4fd1c5; --c3:#b394ff; --c4:#ffa04d; --c5:#8c98ab; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0e131c; --surface:#151b27; --surface-2:#1d2533; --line:#2a3446; --fg:#e6eaf2; --muted:#97a3b6;
+  --accent:#7aa2ff; --accent-ink:#0b1220; --accent-soft:#1c2a4a;
+  --good:#52c88a; --warn:#e0a23a; --bad:#ff7a70; --good-soft:#143323; --warn-soft:#3a2a0e; --bad-soft:#3d1a17;
+  --c1:#7aa2ff; --c2:#4fd1c5; --c3:#b394ff; --c4:#ffa04d; --c5:#8c98ab; color-scheme:dark}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{background:var(--bg);color:var(--fg);font:14px/1.5 var(--sans);margin:0;padding-block:0 96px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:30;background:var(--surface)}
+.wrap{max-width:1180px;margin:0 auto}
+code,.mono{font-family:var(--mono)}
+button{font:inherit;color:inherit}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,.val:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+header.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;margin:0 calc(-1*max(16px,env(safe-area-inset-left,0px)));padding:12px max(16px,env(safe-area-inset-right,0px)) 0 max(16px,env(safe-area-inset-left,0px));background:var(--surface);border-bottom:1px solid var(--line)}
+.head{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;justify-content:space-between;max-width:1180px;margin:0 auto}
+.brand{display:flex;align-items:baseline;gap:12px;min-width:0}
+.brand h1{font-size:18px;margin:0;font-weight:600;letter-spacing:-.01em}
+.brand .host{font:12.5px var(--mono);color:var(--muted);overflow-wrap:anywhere}
+.meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;padding:2px 9px;border-radius:99px;background:var(--surface-2);color:var(--muted);white-space:nowrap}
+.pill i{width:7px;height:7px;border-radius:50%;background:currentColor;display:inline-block}
+.pill.good{background:var(--good-soft);color:var(--good)}.pill.warn{background:var(--warn-soft);color:var(--warn)}.pill.bad{background:var(--bad-soft);color:var(--bad)}.pill.acc{background:var(--accent-soft);color:var(--accent)}
+.tabs{display:flex;gap:2px;max-width:1180px;margin:10px auto 0;overflow-x:auto;scrollbar-width:thin}
+.tabs button{background:none;border:0;border-bottom:2.5px solid transparent;padding:8px 14px 9px;color:var(--muted);cursor:pointer;font-weight:500;white-space:nowrap;display:flex;gap:7px;align-items:center}
+.tabs button:hover{color:var(--fg)}
+.tabs button[aria-selected="true"]{color:var(--fg);border-bottom-color:var(--accent)}
+.tabs .badge{font-size:11px;background:var(--accent);color:var(--accent-ink);border-radius:99px;padding:0 6px;min-width:18px;text-align:center}
+main{max-width:1180px;margin:22px auto 0;display:flex;flex-direction:column;gap:20px}
+.panel[hidden]{display:none}
+.panel{display:flex;flex-direction:column;gap:20px}
+.banner{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;justify-content:space-between;padding:10px 14px;border-radius:8px;background:var(--warn-soft);color:var(--fg);border:1px solid var(--warn)}
+.banner.bad{background:var(--bad-soft);border-color:var(--bad)}
+.banner b{font-weight:600}
+.btn{border:1px solid var(--line);background:var(--surface);border-radius:6px;padding:5px 12px;cursor:pointer;font-weight:500}
+.btn:hover{border-color:var(--muted)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:disabled,.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.small{padding:2px 9px;font-size:12.5px}
+.mockbar{font-size:12.5px;color:var(--muted)}
+section.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:0}
+section.card>h2,.ch h3{font-size:12px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);margin:0 0 12px;font-weight:600}
+.row2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
+.row3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px}
+@media (max-width:860px){.row3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:760px){.row2,.row3{grid-template-columns:minmax(0,1fr)}}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 18px;margin:0}
+.kv dt{color:var(--muted)}.kv dd{margin:0;font-family:var(--mono);font-size:13px;overflow-wrap:anywhere}
+.sumrow{display:flex;flex-wrap:wrap;gap:8px 28px}
+.sum{display:flex;flex-direction:column;gap:2px;min-width:110px}
+.sum .l{font-size:12px;color:var(--muted)}.sum .v{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.01em}.sum .s{font-size:12px;color:var(--muted)}
+.tw{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13px;font-variant-numeric:tabular-nums}
+th{text-align:left;font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:600;padding:6px 14px 6px 0;border-bottom:1.5px solid var(--line);white-space:nowrap}
+td{padding:8px 14px 8px 0;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap}
+td.wrapcell{white-space:normal;min-width:180px}
+td.num,th.num{text-align:right}
+tr:last-child td{border-bottom:0}
+.bar{height:8px;background:var(--surface-2);border-radius:4px;position:relative;min-width:90px;overflow:visible}
+.bar>span{display:block;height:100%;border-radius:4px;background:var(--accent)}
+.bar>em{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--fg);opacity:.55}
+.bar.warn>span{background:var(--c4)}.bar.good>span{background:var(--c2)}
+.legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12px;color:var(--muted);margin-top:8px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.empty{color:var(--muted);padding:6px 0}
+/* charts */
+.ch{min-width:0}.ch header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:4px 12px;margin-bottom:6px}
+.ch h3{margin:0}.ch .now{font:500 13px var(--mono);font-variant-numeric:tabular-nums}
+.ch .stats{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.plot{width:100%;height:190px}
+.plot svg{display:block;width:100%;height:100%}
+.plot text{font:11px var(--sans);fill:var(--muted)}
+.plot .grid{stroke:var(--line);stroke-width:1}
+.plot .refl{stroke:var(--fg);stroke-opacity:.5;stroke-dasharray:4 4;stroke-width:1.2}
+.plot .reft{fill:var(--fg);fill-opacity:.7}
+.plot path.ln{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.s1{stroke:var(--c1)}.s2{stroke:var(--c2)}.s3{stroke:var(--c3)}.s4{stroke:var(--c4)}.s5{stroke:var(--c5)}
+.f1{fill:var(--c1)}.f2{fill:var(--c2)}.f3{fill:var(--c3)}.f4{fill:var(--c4)}.f5{fill:var(--c5)}
+.plot .area{fill-opacity:.82;stroke:var(--surface);stroke-width:1}
+.range{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.range button{border:0;background:var(--surface);padding:3px 11px;cursor:pointer;color:var(--muted);font-size:12.5px}
+.range button[aria-pressed="true"]{background:var(--fg);color:var(--bg)}
+.tools{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;justify-content:space-between}
+/* configuration */
+.cfg h3.sec{font:500 13px var(--mono);margin:0 0 4px;color:var(--fg)}
+.field{display:grid;grid-template-columns:minmax(150px,230px) minmax(0,1fr) auto;gap:4px 18px;align-items:start;padding:10px 0;border-top:1px solid var(--line)}
+.field:first-of-type{border-top:0}
+.field .k{font:500 13px var(--mono);overflow-wrap:anywhere;display:flex;align-items:center;gap:7px;padding-top:4px}
+.field .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
+.field .help{grid-column:2;font-size:12.5px;color:var(--muted);max-width:68ch}
+.field .note{grid-column:2;font-size:12.5px;max-width:68ch}
+.field .note.warn{color:var(--warn)}.field .note.bad{color:var(--bad)}
+.val{display:inline-flex;align-items:center;gap:8px;max-width:100%;min-height:30px;padding:3px 10px;border:1px solid transparent;border-radius:6px;background:var(--surface-2);cursor:text;font:13px var(--mono);text-align:left;overflow-wrap:anywhere;word-break:break-word}
+.val:hover{border-color:var(--accent)}
+.val .pen{opacity:0;font:11px var(--sans);color:var(--accent)}
+.val:hover .pen,.val:focus-visible .pen{opacity:1}
+.val.isdef{color:var(--muted);font-style:italic}
+.edit{display:flex;flex-direction:column;gap:4px;min-width:0}
+.edit input,.edit select{font:13px var(--mono);padding:5px 9px;border:1.5px solid var(--accent);border-radius:6px;background:var(--surface);color:var(--fg);width:100%;max-width:560px}
+.edit .err{color:var(--bad);font-size:12.5px}
+.edit .hint{color:var(--muted);font-size:12px}
+.sw{position:relative;width:40px;height:22px;border-radius:99px;border:0;background:var(--line);cursor:pointer;padding:0;margin-top:3px;flex:none}
+.sw::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:var(--surface);transition:transform .12s}
+.sw[aria-checked="true"]{background:var(--accent)}.sw[aria-checked="true"]::after{transform:translateX(18px)}
+.swrow{display:flex;gap:10px;align-items:center}.swrow span{font:13px var(--mono)}
+.was{font-size:12px;color:var(--muted);white-space:nowrap}
+.was button{border:0;background:none;color:var(--accent);cursor:pointer;padding:0 0 0 6px;font-size:12px}
+@media (max-width:640px){.field{grid-template-columns:minmax(0,1fr)}.field .help,.field .note{grid-column:1}.was{white-space:normal}}
+.savebar{position:fixed;left:0;right:0;bottom:0;z-index:25;background:var(--surface);border-top:1px solid var(--line);padding:10px max(16px,env(safe-area-inset-right,0px)) calc(10px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px))}
+.savebar .in{max-width:1180px;margin:0 auto;display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;justify-content:space-between}
+.savebar[hidden]{display:none}
+.diff{font:12.5px/1.55 var(--mono);margin:0;padding:8px 0;overflow-x:auto;background:var(--surface-2);border-radius:8px}
+.diff div{padding:0 14px;white-space:pre}
+.diff .add{background:var(--good-soft);color:var(--good)}.diff .del{background:var(--bad-soft);color:var(--bad)}.diff .ctx{color:var(--muted)}
+/* raw editor */
+.editor{display:grid;grid-template-columns:auto minmax(0,1fr);border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface)}
+.gutter{margin:0;padding:10px 10px 10px 14px;text-align:right;color:var(--muted);font:13px/1.6 var(--mono);background:var(--surface-2);overflow:hidden;user-select:none;height:480px}
+.gutter .bad{color:var(--bad);font-weight:600}
+#raw{font:13px/1.6 var(--mono);padding:10px 14px;border:0;resize:none;background:var(--surface);color:var(--fg);height:480px;width:100%;white-space:pre;overflow:auto;tab-size:4;outline-offset:-2px}
+.status-line{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;justify-content:space-between;font-size:13px}
+.toast{position:fixed;left:50%;bottom:calc(76px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:8px 16px;border-radius:8px;font-size:13px;z-index:40;max-width:calc(100vw - 32px)}
+.toast[hidden]{display:none}
+@media (prefers-reduced-motion:reduce){.sw::after{transition:none}}
+
+.lock{position:fixed;inset:0;z-index:50;background:color-mix(in srgb,var(--bg) 88%,transparent);display:flex;align-items:center;justify-content:center;padding:16px}
+.lock[hidden]{display:none}
+.lock form{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:22px 24px;max-width:380px;width:100%;display:flex;flex-direction:column;gap:12px}
+.lock h2{margin:0;font-size:17px}.lock p{margin:0;color:var(--muted)}
+.lock input{font:14px var(--mono);padding:7px 10px;border:1.5px solid var(--line);border-radius:6px;background:var(--surface);color:var(--fg)}
+.lock .err{color:var(--bad);min-height:1.2em;font-size:13px}
+.val.ro{cursor:default}.val.ro:hover{border-color:transparent}
+.sw:disabled{opacity:.5;cursor:not-allowed}
+.note.info{color:var(--muted)}
+.f6{fill:var(--bad)}
+#livepill{cursor:pointer}
+.banner.info{background:var(--surface-2);border-color:var(--line)}
+
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="head">
+    <div class="brand"><h1>datafeedfs</h1><span class="host" id="host"></span></div>
+    <div class="meta"><span class="pill" id="mountpill" data-testid="mount-pill"><i></i><span id="mounttext">Connecting…</span></span><span class="pill" id="editpill" hidden></span><span class="pill" id="livepill" role="button" tabindex="0" title="Click to pause or resume the live update">Live</span></div>
+  </div>
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button role="tab" id="tab-status" data-tab="status" aria-selected="true">Status</button>
+    <button role="tab" id="tab-configuration" data-tab="configuration" aria-selected="false">Configuration <span class="badge" id="cfgbadge" hidden>0</span></button>
+    <button role="tab" id="tab-performance" data-tab="performance" aria-selected="false">Performance</button>
+    <button role="tab" id="tab-load" data-tab="load" aria-selected="false">Load</button>
+    <button role="tab" id="tab-config-toml" data-tab="config-toml" aria-selected="false">config.toml</button>
+  </nav>
+</header>
+
+<div class="wrap"><main>
+  <div id="remount" class="banner" hidden data-testid="restart-banner">
+    <span id="remounttext"><b>config.toml was saved after the last start.</b> Restart to apply it. Running passes are interrupted.</span>
+    <button class="btn primary" id="remountbtn" type="button">Restart now</button>
+  </div>
+  <div class="banner bad" id="apierr" hidden role="alert"></div>
+
+  <!-- STATUS -->
+  <div class="panel" id="p-status" role="tabpanel" aria-labelledby="tab-status">
+    <section class="card">
+      <h2>Mount</h2>
+      <div class="sumrow">
+        <div class="sum"><span class="l">Passes running</span><span class="v" id="s-run" data-testid="s-run">–</span><span class="s">slots in use</span></div>
+        <div class="sum"><span class="l">Waiting</span><span class="v" id="s-wait" data-testid="s-wait">–</span><span class="s">passes queued</span></div>
+        <div class="sum"><span class="l">Failed</span><span class="v" id="s-fail" data-testid="s-fail">–</span><span class="s">files since start</span></div>
+        <div class="sum"><span class="l">Cache</span><span class="v" id="s-cache" data-testid="s-cache">–</span><span class="s" id="s-cache-sub"></span></div>
+        <div class="sum"><span class="l">Uptime</span><span class="v" id="s-up">–</span><span class="s" id="s-version"></span></div>
+      </div>
+    </section>
+    <div class="row2">
+      <section class="card">
+        <h2>Cache by kind</h2>
+        <div id="kinds" data-testid="kinds"></div>
+        <p class="mockbar" style="margin:12px 0 0" id="scannote"></p>
+      </section>
+      <section class="card">
+        <h2>Details</h2>
+        <dl class="kv" id="details" data-testid="details"></dl>
+      </section>
+    </div>
+    <section class="card">
+      <h2>Passes</h2>
+      <div class="tw"><table>
+        <thead><tr><th>Pass</th><th class="num">Symbols</th><th class="num">Elapsed</th><th>Started</th></tr></thead>
+        <tbody id="passes" data-testid="passes"></tbody>
+      </table></div>
+    </section>
+    <section class="card">
+      <h2>Failures</h2>
+      <div id="fails" data-testid="fails"></div>
+    </section>
+  </div>
+
+  <!-- CONFIGURATION -->
+  <div class="panel" id="p-configuration" role="tabpanel" aria-labelledby="tab-configuration" hidden>
+    <div class="banner bad" id="cfgerr" hidden role="alert" data-testid="cfgerr"></div>
+    <div class="banner info" id="cfgro" hidden>Editing is turned off (<code>ui.allow_edit = false</code>). Values are shown as saved on disk.</div>
+    <section class="card cfg">
+      <div class="tools" style="margin-bottom:6px">
+        <span class="mockbar" id="cfghint">Click a value to edit it. Enter applies the edit to the form, Esc cancels. Nothing is written until you press Save config.toml in the bar at the bottom of the page.</span>
+        <span class="mockbar mono" id="cfgpath"></span>
+      </div>
+      <div id="fields"></div>
+    </section>
+    <section class="card" id="diffcard" hidden>
+      <h2>Changes to save</h2>
+      <pre class="diff" id="diff" data-testid="diff"></pre>
+    </section>
+  </div>
+
+  <!-- PERFORMANCE -->
+  <div class="panel" id="p-performance" role="tabpanel" aria-labelledby="tab-performance" hidden>
+    <div class="tools"><div class="range" role="group" aria-label="Time range" id="range-p"></div><span class="mockbar" id="upd-p"></span></div>
+    <div class="banner info" id="unsup-p" hidden>Host figures come from /proc and are not available on this platform.</div>
+    <div class="row2">
+      <section class="card ch"><header><h3>Network received</h3><span class="now" id="now-net"></span></header><div class="plot" id="c-net" data-testid="chart-net"></div><div class="stats" id="st-net"></div></section>
+      <section class="card ch"><header><h3>Cache hit ratio</h3><span class="now" id="now-hit"></span></header><div class="plot" id="c-hit" data-testid="chart-hit"></div><div class="stats" id="st-hit"></div></section>
+      <section class="card ch"><header><h3>Recent pass durations</h3><span class="now" id="now-dur"></span></header><div class="plot" id="c-dur" data-testid="chart-dur"></div><div class="legend"><span><i style="background:var(--c1)"></i>tick</span><span><i style="background:var(--c2)"></i>orderbook</span><span><i style="background:var(--c3)"></i>stream</span><span><i style="background:var(--bad)"></i>failed</span></div></section>
+      <section class="card ch"><header><h3>Cache writes</h3><span class="now" id="now-dsk"></span></header><div class="plot" id="c-dsk" data-testid="chart-dsk"></div><div class="stats" id="st-dsk"></div></section>
+    </div>
+    <section class="card">
+      <h2>Completed passes since start</h2>
+      <div class="tw"><table>
+        <thead><tr><th>Pass</th><th class="num">Symbols</th><th class="num">Duration</th><th>Result</th><th>Finished</th></tr></thead>
+        <tbody id="done" data-testid="done"></tbody>
+      </table></div>
+    </section>
+  </div>
+
+  <!-- LOAD -->
+  <div class="panel" id="p-load" role="tabpanel" aria-labelledby="tab-load" hidden>
+    <div class="tools"><div class="range" role="group" aria-label="Time range" id="range-l"></div><span class="mockbar" id="upd-l"></span></div>
+    <div class="banner info" id="unsup-l" hidden>Host figures come from /proc and are not available on this platform.</div>
+    <section class="card">
+      <h2>Host</h2>
+      <div class="sumrow" data-testid="host">
+        <div class="sum"><span class="l">CPUs</span><span class="v" id="l-cpus">–</span><span class="s" id="l-ram"></span></div>
+        <div class="sum"><span class="l">CPU busy</span><span class="v" id="l-cpu">–</span><span class="s">user + system</span></div>
+        <div class="sum"><span class="l">Load average</span><span class="v" id="l-load">–</span><span class="s">1 minute</span></div>
+        <div class="sum"><span class="l">Memory</span><span class="v" id="l-mem">–</span><span class="s" id="l-memsub"></span></div>
+        <div class="sum"><span class="l">Disk of the cache</span><span class="v" id="l-disk">–</span><span class="s" id="l-disksub"></span></div>
+      </div>
+    </section>
+    <div class="row2">
+      <section class="card ch"><header><h3>CPU by process group</h3><span class="now" id="now-cpu"></span></header><div class="plot" id="c-cpu" data-testid="chart-cpu"></div><div class="legend" id="lg-cpu"></div></section>
+      <section class="card ch"><header><h3>Load average</h3><span class="now" id="now-lav"></span></header><div class="plot" id="c-lav" data-testid="chart-lav"></div><div class="legend"><span><i style="background:var(--c1)"></i>1 min</span><span><i style="background:var(--c3)"></i>15 min</span></div></section>
+    </div>
+    <div class="row2">
+      <section class="card">
+        <h2>Extraction slots</h2>
+        <div id="slots" data-testid="slots"></div>
+        <p class="mockbar" style="margin:12px 0 0" id="slotnote"></p>
+      </section>
+      <section class="card">
+        <h2>Busiest processes</h2>
+        <div class="tw"><table>
+          <thead><tr><th>Process</th><th>Command</th><th class="num">CPU</th><th class="num">RSS</th></tr></thead>
+          <tbody id="top" data-testid="top"></tbody>
+        </table></div>
+      </section>
+    </div>
+  </div>
+
+  <!-- RAW config.toml -->
+  <div class="panel" id="p-config-toml" role="tabpanel" aria-labelledby="tab-config-toml" hidden>
+    <div class="status-line">
+      <span><span class="mono" id="rawpath">config.toml</span> <span class="pill" id="rawstate" data-testid="rawstate">Saved</span> <span id="rawmsg" class="mockbar"></span></span>
+      <span class="mockbar">Edits here and in the Configuration tab change the same text.</span>
+    </div>
+    <div class="editor"><pre class="gutter" id="gutter" aria-hidden="true"></pre><textarea id="raw" spellcheck="false" aria-label="config.toml" wrap="off"></textarea></div>
+  </div>
+</main></div>
+
+<div class="savebar" id="savebar" hidden><div class="in">
+  <span id="savemsg" data-testid="savemsg">No unsaved changes. Edit a value, then save it here.</span>
+  <span style="display:flex;gap:8px;flex-wrap:wrap">
+    <button class="btn" id="diffbtn" type="button">Review changes</button>
+    <button class="btn" id="discard" type="button">Discard</button>
+    <button class="btn primary" id="save" type="button">Save config.toml</button>
+  </span>
+</div></div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<div class="lock" id="lock" hidden><form id="lockform"><h2>This console needs a token</h2><p>Enter <code>ui.token</code> from config.toml.</p><input id="tokeninp" type="password" autocomplete="off" aria-label="Token"><div class="err" id="lockerr" role="alert"></div><button class="btn primary" type="submit">Unlock</button></form></div>
+
+<script>
+var FIELDS=[
+ {sec:'remote',key:'ssh_host',type:'string',def:'',help:'user@host that holds the pcap files. Empty means the files are on this machine.'},
+ {sec:'remote',key:'pcap_path',type:'string',req:true,help:'One pcap per trading day. {yyyy} {mm} {dd} are replaced; the same pattern with wildcards finds the days.'},
+ {sec:'remote',key:'ssh_options',type:'list',def:['-o','BatchMode=yes','-o','ServerAliveInterval=30'],help:'Passed to ssh. BatchMode stops the container from ever prompting.'},
+ {sec:'parser',key:'command',type:'string',req:true,help:'Run once per pass with the pcap on stdin. Relative paths are relative to this file.',warn:'This command is run by the process after a restart. Only change it if you trust whoever can open this console.'},
+ {sec:'parser',key:'env',type:'table',def:{},help:'Extra environment for the parser. DFS_PORT restricts decoding to one UDP destination port.'},
+ {sec:'cache',key:'dir',type:'string',def:'~/.cache/datafeedfs',help:'Where parquet and csv files are kept.'},
+ {sec:'cache',key:'max_gb',type:'float',def:0,min:0,help:'Size cap of cached files in GiB. 0 means unlimited: nothing is evicted.'},
+ {sec:'cache',key:'evict_to',type:'float',def:0.9,min:0.01,max:1,help:'Once over the cap, delete the least recently used files down to this fraction of it.'},
+ {sec:'cache',key:'scan_interval_seconds',type:'float',def:600,min:1,help:'How often the cache size is checked.'},
+ {sec:'cache',key:'touch_interval_seconds',type:'float',def:3600,min:1,help:'A read bumps a file’s access time at most this often.'},
+ {sec:'orderbook',key:'depth',type:'int',def:5,min:1,max:64,help:'Price levels per side in /orderbook.',impact:'A different depth is a separate cache. Cached files of the old depth are not reused.'},
+ {sec:'extract',key:'batch_window_seconds',type:'float',def:3,min:0,help:'Requests for one day inside this window share one pass over the pcap.'},
+ {sec:'extract',key:'max_parallel',type:'int',def:2,min:1,max:64,help:'Passes over different days at once.'},
+ {sec:'extract',key:'on_miss',type:'enum',opts:['block','async'],def:'block',help:'block: open() waits for the extraction. async: open() fails with EAGAIN and extraction continues.'},
+ {sec:'extract',key:'whole_day',type:'bool',def:false,help:'A miss extracts every symbol of that day in one pass: more disk, much less pcap reading.'},
+ {sec:'telemetry',key:'enabled',type:'bool',def:false,help:'Export OpenTelemetry metrics and one trace per extraction pass over OTLP/HTTP.'},
+ {sec:'telemetry',key:'endpoint',type:'string',def:'',help:'OTLP/HTTP base URL, for example http://collector:4318. Empty uses OTEL_EXPORTER_OTLP_ENDPOINT or http://localhost:4318.'},
+ {sec:'telemetry',key:'service_name',type:'string',def:'datafeedfs',help:'The service.name resource attribute.'},
+ {sec:'telemetry',key:'metrics_interval_seconds',type:'float',def:15,min:0.1,help:'How often metrics are exported.'},
+ {sec:'ui',key:'listen',type:'string',def:'',help:'host:port of this console. Empty turns the console off.',warn:'Changing this moves or disables the console after a restart. Keep the address you are using now unless you mean to.'},
+ {sec:'ui',key:'allow_edit',type:'bool',def:false,help:'Let this console save config.toml.',warn:'Turning this off means the console cannot edit the file after the restart.'},
+ {sec:'ui',key:'allow_restart',type:'bool',def:false,help:'Let this console stop the process so its supervisor starts it again with the saved config.'},
+ {sec:'ui',key:'token',type:'string',def:'',secret:true,help:'Bearer token for the console API. Required when listen is not a loopback address.',warn:'After a restart this console asks for the new token.'}
+];
+
+function commentIndex(l){var q=null;for(var i=0;i<l.length;i++){var c=l[i];if(q){if(c==='\\'&&q==='"'){i++;continue}if(c===q)q=null}else if(c==='"'||c==="'")q=c;else if(c==='#')return i}return -1}
+function stripComment(l){var i=commentIndex(l);return (i<0?l:l.slice(0,i)).trimEnd()}
+function splitTop(s){var out=[],d=0,q=null,cur='';for(var i=0;i<s.length;i++){var c=s[i];if(q){cur+=c;if(c==='\\'&&q==='"'){cur+=s[++i]||'';continue}if(c===q)q=null;continue}if(c==='"'||c==="'"){q=c;cur+=c;continue}if(c==='['||c==='{')d++;if(c===']'||c==='}')d--;if(c===','&&d===0){out.push(cur);cur='';continue}cur+=c}if(cur.trim())out.push(cur);return out}
+function parseValue(s){
+  s=s.trim();if(!s)throw new Error('missing value');
+  if(s[0]==='"'){try{return JSON.parse(s)}catch(e){throw new Error('unterminated or invalid string')}}
+  if(s[0]==="'"){if(s.length<2||s[s.length-1]!=="'")throw new Error('unterminated string');return s.slice(1,-1)}
+  if(s==='true')return true;if(s==='false')return false;
+  if(s[0]==='['){if(s[s.length-1]!==']')throw new Error('array is missing ]');return splitTop(s.slice(1,-1)).map(parseValue)}
+  if(s[0]==='{'){if(s[s.length-1]!=='}')throw new Error('table is missing }');var o={};splitTop(s.slice(1,-1)).forEach(function(p){var m=p.match(/^\s*([A-Za-z0-9_-]+)\s*=\s*([\s\S]*)$/);if(!m)throw new Error('bad table entry: '+p.trim());o[m[1]]=parseValue(m[2])});return o}
+  if(/^[+-]?\d[\d_]*(\.\d+)?([eE][+-]?\d+)?$/.test(s))return Number(s.replace(/_/g,''));
+  throw new Error('unrecognized value: '+s);
+}
+function parseToml(text){
+  var data={},errors=[],sec='';
+  text.split('\n').forEach(function(raw,i){
+    var l=stripComment(raw).trim();if(!l)return;var m;
+    if((m=l.match(/^\[([A-Za-z0-9_.-]+)\]$/))){sec=m[1];if(data[sec])errors.push({line:i+1,msg:'duplicate section ['+sec+']'});else data[sec]={};return}
+    if((m=l.match(/^([A-Za-z0-9_-]+)\s*=\s*(.*)$/))){
+      if(!sec){errors.push({line:i+1,msg:'key outside a section'});return}
+      try{if(Object.prototype.hasOwnProperty.call(data[sec],m[1]))throw new Error('duplicate key '+m[1]);data[sec][m[1]]=parseValue(m[2])}catch(e){errors.push({line:i+1,msg:e.message})}
+      return}
+    errors.push({line:i+1,msg:'expected [section] or key = value'});
+  });
+  return {data:data,errors:errors};
+}
+function toToml(v){
+  if(typeof v==='string')return JSON.stringify(v);
+  if(typeof v==='boolean'||typeof v==='number')return String(v);
+  if(Array.isArray(v))return '['+v.map(toToml).join(', ')+']';
+  var k=Object.keys(v);return k.length?'{ '+k.map(function(x){return x+' = '+toToml(v[x])}).join(', ')+' }':'{}';
+}
+function sectionRange(lines,sec){var start=-1,end=lines.length;for(var i=0;i<lines.length;i++){var m=stripComment(lines[i]).trim().match(/^\[([^\]]+)\]$/);if(m){if(start>=0){end=i;break}if(m[1]===sec)start=i}}return start<0?null:[start,end]}
+function setKey(text,sec,key,valStr){
+  var lines=text.split('\n'),r=sectionRange(lines,sec),re=new RegExp('^(\\s*'+key+'\\s*=\\s*)');
+  if(!r){while(lines.length&&!lines[lines.length-1].trim())lines.pop();lines.push('','['+sec+']',key+' = '+valStr,'');return lines.join('\n')}
+  for(var i=r[0]+1;i<r[1];i++){var m=lines[i].match(re);if(m){var ci=commentIndex(lines[i]);lines[i]=m[1]+valStr+(ci>=0?'   '+lines[i].slice(ci):'');return lines.join('\n')}}
+  var at=r[1];while(at>r[0]+1&&!lines[at-1].trim())at--;
+  lines.splice(at,0,key+' = '+valStr);return lines.join('\n');
+}
+function removeKey(text,sec,key){
+  var lines=text.split('\n'),r=sectionRange(lines,sec);if(!r)return text;
+  var re=new RegExp('^\\s*'+key+'\\s*=');
+  for(var i=r[0]+1;i<r[1];i++)if(re.test(lines[i])){lines.splice(i,1);break}
+  return lines.join('\n');
+}
+function diffLines(a,b){
+  var x=a.split('\n'),y=b.split('\n'),n=x.length,m=y.length,L=[];
+  for(var i=0;i<=n;i++){L.push(new Array(m+1).fill(0))}
+  for(i=n-1;i>=0;i--)for(var j=m-1;j>=0;j--)L[i][j]=x[i]===y[j]?L[i+1][j+1]+1:Math.max(L[i+1][j],L[i][j+1]);
+  var out=[];i=0;j=0;
+  while(i<n&&j<m){if(x[i]===y[j]){out.push({t:' ',s:x[i]});i++;j++}else if(L[i+1][j]>=L[i][j+1]){out.push({t:'-',s:x[i]});i++}else{out.push({t:'+',s:y[j]});j++}}
+  while(i<n)out.push({t:'-',s:x[i++]});while(j<m)out.push({t:'+',s:y[j++]});
+  return out;
+}
+function fieldValue(parsed,f){var s=parsed.data[f.sec];return s&&Object.prototype.hasOwnProperty.call(s,f.key)?{v:s[f.key],set:true}:{v:f.def,set:false}}
+function editText(f,v){if(f.type==='string')return v;if(f.type==='list'||f.type==='table')return toToml(v);return String(v)}
+function validateInput(f,s){
+  var t=s.trim();
+  switch(f.type){
+    case 'string':if(f.req&&!s.trim())return{err:'Required.'};return{v:s};
+    case 'int':if(!/^-?\d+$/.test(t))return{err:'Enter a whole number.'};
+    case 'float':{var n=Number(t);if(t===''||!isFinite(n))return{err:'Enter a number.'};
+      if(f.min!=null&&n<f.min)return{err:'Must be at least '+f.min+'.'};if(f.max!=null&&n>f.max)return{err:'Must be at most '+f.max+'.'};return{v:n}}
+    case 'list':{try{var a=parseValue(t);if(!Array.isArray(a))return{err:'Enter a TOML array, for example ["-o", "BatchMode=yes"].'};return{v:a}}catch(e){return{err:e.message+'. Example: ["-o", "BatchMode=yes"]'}}}
+    case 'table':{try{var o=parseValue(t||'{}');if(!o||typeof o!=='object'||Array.isArray(o))return{err:'Enter a TOML inline table, for example { DFS_PORT = "26477" }.'};return{v:o}}catch(e){return{err:e.message+'. Example: { DFS_PORT = "26477" }'}}}
+    case 'enum':return f.opts.indexOf(t)<0?{err:'Choose one of: '+f.opts.join(', ')+'.'}:{v:t};
+  }
+  return{err:'Unsupported field.'};
+}
+
+var $=function(id){return document.getElementById(id)};
+var S={saved:'',text:'',editing:null,showDiff:false,good:{data:{},errors:[]},tab:'status',range:'15m',paused:false,serverErr:'',saving:false,loaded:false,focusEdit:false};
+var CF=null,ST=null,MT=null,TOKEN='';
+try{TOKEN=sessionStorage.getItem('dfs-token')||''}catch(e){}
+
+function toast(msg){var t=$('toast');t.textContent=msg;t.hidden=false;clearTimeout(toast.h);toast.h=setTimeout(function(){t.hidden=true},3600)}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function pad(n){return n<10?'0'+n:''+n}
+function clock(ms){if(!ms)return '–';var d=new Date(ms);return pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds())}
+function dur(s){s=Math.max(0,Math.round(s));if(s<60)return s+' s';if(s<3600)return Math.floor(s/60)+' min '+pad(s%60)+' s';return Math.floor(s/3600)+' h '+pad(Math.floor(s%3600/60))+' min'}
+function gib(b){return (b/1073741824).toFixed(b>=1073741824*10?1:2)+' GiB'}
+function bytes(b){if(b>=1073741824)return gib(b);if(b>=1048576)return (b/1048576).toFixed(1)+' MiB';if(b>=1024)return (b/1024).toFixed(1)+' KiB';return b+' B'}
+
+/* ---------- API ---------- */
+function api(path,opt){
+  opt=opt||{};var headers={};if(TOKEN)headers['Authorization']='Bearer '+TOKEN;
+  var method=opt.method||'GET';if(method!=='GET')headers['X-Requested-With']='datafeedfs-ui';
+  if(opt.body!==undefined){headers['Content-Type']='application/json'}
+  return fetch(path,{method:method,headers:headers,body:opt.body===undefined?undefined:JSON.stringify(opt.body),cache:'no-store'}).then(function(r){
+    return r.json().catch(function(){return {}}).then(function(j){
+      if(r.status===401){showLock(TOKEN?'Wrong token.':'');var e=new Error('unauthorized');e.status=401;throw e}
+      if(!r.ok){var e2=new Error(j.error||('HTTP '+r.status));e2.status=r.status;throw e2}
+      return j});
+  });
+}
+function showLock(msg){$('lock').hidden=false;$('lockerr').textContent=msg||'';setTimeout(function(){$('tokeninp').focus()},0)}
+$('lockform').addEventListener('submit',function(e){e.preventDefault();TOKEN=$('tokeninp').value;try{sessionStorage.setItem('dfs-token',TOKEN)}catch(x){}$('lock').hidden=true;start()});
+function showApiError(msg){var b=$('apierr');if(!msg){b.hidden=true;return}b.hidden=false;b.textContent=msg}
+
+/* ---------- config state ---------- */
+function canEdit(){return !!(CF&&CF.allow_edit)}
+function parsedNow(){var p=parseToml(S.text);if(!p.errors.length)S.good=p;return p}
+function changedFields(){
+  var cur=parsedNow(),old=parseToml(S.saved),list=[];
+  FIELDS.forEach(function(f){var a=fieldValue(S.good,f),b=fieldValue(old,f);if(JSON.stringify(a.v)!==JSON.stringify(b.v)||a.set!==b.set)list.push({f:f,was:b,now:a})});
+  return list;
+}
+function dirtyCount(){var n=changedFields().length;if(!n&&S.text!==S.saved)n=1;return n}
+function setField(f,v){S.text=setKey(S.text,f.sec,f.key,toToml(v));afterEdit()}
+function resetField(f){var old=fieldValue(parseToml(S.saved),f);S.text=old.set?setKey(S.text,f.sec,f.key,toToml(old.v)):removeKey(S.text,f.sec,f.key);afterEdit()}
+function afterEdit(){S.editing=null;scheduleValidate();render()}
+var vt;
+function scheduleValidate(){
+  clearTimeout(vt);
+  if(S.text===S.saved||parseToml(S.text).errors.length){S.serverErr='';return}
+  var snapshot=S.text;
+  vt=setTimeout(function(){
+    api('/api/config/validate',{method:'POST',body:{text:snapshot}}).then(function(){if(S.text===snapshot){S.serverErr='';renderBar();renderFields();renderRaw()}})
+      .catch(function(e){if(S.text===snapshot&&e.status!==401){S.serverErr=e.message;renderBar();renderFields();renderRaw()}});
+  },350);
+}
+function warnFor(f,v){
+  if(f.key==='max_parallel'&&v>3)return 'Every pass reads a whole pcap over ssh. If the link to the pcap host is already full, more parallel passes do not finish days faster; they use more RAM and CPU.';
+  if(f.key==='max_gb'&&v>0&&ST&&ST.cache.disk&&ST.cache.disk.total){var room=(ST.cache.disk.free+ST.cache.bytes)/1073741824;if(v>room)return 'The cap is above what the disk can hold ('+room.toFixed(0)+' GiB free plus cached). The disk would fill before eviction starts.'}
+  if(f.key==='on_miss'&&v==='async')return 'Readers get EAGAIN until the pass finishes, so scripts must retry.';
+  return '';
+}
+
+/* ---------- render: configuration ---------- */
+function renderFields(){
+  if(!S.loaded)return;
+  var p=parsedNow(),changed={},ro=!canEdit();changedFields().forEach(function(c){changed[c.f.sec+'.'+c.f.key]=c});
+  var err=$('cfgerr');
+  if(p.errors.length){err.hidden=false;err.innerHTML='<span><b>config.toml has a syntax error on line '+p.errors[0].line+':</b> '+esc(p.errors[0].msg)+'. The form shows the last valid values until it is fixed in the config.toml tab.</span><button class="btn" type="button" data-goto="config-toml">Open config.toml</button>'}
+  else if(S.serverErr){err.hidden=false;err.innerHTML='<span><b>The server rejected this config:</b> '+esc(S.serverErr)+'</span>'+(S.conflict?'<button class="btn" type="button" id="reloadcfg">Reload from disk</button>':'')}
+  else err.hidden=true;
+  $('cfgro').hidden=!ro;
+  var html='',cur='';
+  FIELDS.forEach(function(f){
+    var id=f.sec+'.'+f.key,fv=fieldValue(S.good,f),c=changed[id];
+    if(f.sec!==cur){if(cur)html+='</div>';cur=f.sec;html+='<div class="group" style="margin-top:'+(html?'18px':'0')+'"><h3 class="sec">['+f.sec+']</h3>'}
+    html+='<div class="field" data-id="'+id+'" data-testid="field-'+id+'"><div class="k">'+(c?'<span class="dot" title="Changed"></span>':'')+esc(f.key)+'</div><div>';
+    if(S.editing===id&&f.type!=='bool'&&!ro){
+      if(f.type==='enum'){html+='<div class="edit"><select id="inp" data-f="'+id+'" aria-label="'+esc(f.key)+'">'+f.opts.map(function(o){return '<option'+(o===fv.v?' selected':'')+'>'+o+'</option>'}).join('')+'</select><span class="hint">Choose a value. Esc cancels.</span></div>'}
+      else{html+='<div class="edit"><input id="inp" data-f="'+id+'" aria-label="'+esc(f.key)+'" value="'+esc(editText(f,fv.v))+'" autocomplete="off" spellcheck="false"><span class="err" id="inperr"></span><span class="hint">Enter applies, Esc cancels.'+(f.min!=null?' Range '+f.min+' to '+(f.max!=null?f.max:'any')+'.':'')+'</span></div>'}
+    }else if(f.type==='bool'){
+      html+='<div class="swrow"><button class="sw" type="button" role="switch" aria-checked="'+fv.v+'" aria-label="'+esc(f.key)+'" data-sw="'+id+'"'+(ro?' disabled':'')+'></button><span>'+fv.v+'</span></div>';
+    }else{
+      var shown=f.type==='string'||f.type==='enum'?'"'+fv.v+'"':toToml(fv.v);
+      if(f.secret&&fv.set&&fv.v)shown='"••••••••"';
+      html+='<button class="val'+(fv.set?'':' isdef')+(ro?' ro':'')+'" type="button" '+(ro?'tabindex="-1" aria-disabled="true"':'data-edit="'+id+'"')+' aria-label="'+(ro?'Value of ':'Edit ')+esc(f.key)+'">'+esc(shown)+(fv.set?'':'  (default)')+(ro?'':'<span class="pen">Edit</span>')+'</button>';
+    }
+    html+='</div><div class="was">'+(c?'was <span class="mono">'+esc(f.secret?'(hidden)':c.was.set?toToml(c.was.v):'unset')+'</span><button type="button" data-reset="'+id+'">Reset</button>':'')+'</div>';
+    html+='<div class="help">'+esc(f.help)+'</div>';
+    var w=warnFor(f,fv.v);if(w)html+='<div class="note warn">'+esc(w)+'</div>';
+    if(c&&f.impact)html+='<div class="note warn">'+esc(f.impact)+'</div>';
+    if(c&&f.warn)html+='<div class="note warn">'+esc(f.warn)+'</div>';
+    html+='</div>';
+  });
+  $('fields').innerHTML=html+'</div>';
+  var inp=$('inp');if(inp&&S.focusEdit){inp.focus();if(inp.select&&inp.tagName==='INPUT')inp.select();S.focusEdit=false}
+}
+function renderBar(){
+  if(!S.loaded)return;
+  var n=dirtyCount(),syntax=!!parseToml(S.text).errors.length;
+  $('savebar').hidden=!(canEdit()&&(S.tab==='configuration'||S.tab==='config-toml'));
+  $('savemsg').innerHTML=n?'<b>'+n+'</b> unsaved change'+(n===1?'':'s'):'No unsaved changes. Edit a value, then save it here.';
+  $('cfgbadge').hidden=!n;$('cfgbadge').textContent=n;
+  $('save').disabled=!n||syntax||!!S.serverErr||S.saving;$('discard').disabled=!n;$('diffbtn').disabled=!n;
+  $('diffbtn').textContent=S.showDiff?'Hide changes':'Review changes';
+  var card=$('diffcard');card.hidden=!(S.showDiff&&n&&S.tab==='configuration');
+  if(!card.hidden){$('diff').innerHTML=diffLines(S.saved,S.text).filter(function(d,i,a){if(d.t!==' ')return true;for(var k=Math.max(0,i-1);k<=Math.min(a.length-1,i+1);k++)if(a[k].t!==' ')return true;return false}).map(function(d){return '<div class="'+(d.t==='+'?'add':d.t==='-'?'del':'ctx')+'">'+d.t+' '+esc(d.s)+'</div>'}).join('')}
+  var need=CF&&CF.etag!==CF.applied_etag;
+  $('remount').hidden=!need;
+  if(need){var allow=CF.allow_restart;$('remountbtn').hidden=!allow;$('remounttext').innerHTML='<b>config.toml was saved after the last start.</b> '+(allow?'Restart to apply it. Running passes are interrupted.':'It takes effect when the process is restarted (for Docker: docker compose restart).')}
+}
+function renderRaw(){
+  if(!S.loaded)return;
+  var ta=$('raw');if(ta.value!==S.text)ta.value=S.text;ta.readOnly=!canEdit();
+  var p=parseToml(S.text),lines=S.text.split('\n'),bad={};p.errors.forEach(function(e){bad[e.line]=1});
+  $('gutter').innerHTML=lines.map(function(_,i){return bad[i+1]?'<span class="bad">'+(i+1)+'</span>':(i+1)}).join('\n');
+  var st=$('rawstate'),dirty=S.text!==S.saved;
+  if(p.errors.length){st.className='pill bad';st.textContent='Syntax error';$('rawmsg').textContent='Line '+p.errors[0].line+': '+p.errors[0].msg}
+  else if(S.serverErr){st.className='pill bad';st.textContent='Rejected';$('rawmsg').textContent=S.serverErr}
+  else{st.className='pill '+(dirty?'warn':'good');st.textContent=dirty?'Unsaved changes':'Saved';$('rawmsg').textContent=Object.keys(p.data).length+' sections, '+Object.keys(p.data).reduce(function(a,k){return a+Object.keys(p.data[k]).length},0)+' keys'}
+  $('gutter').scrollTop=ta.scrollTop;
+}
+function render(){renderFields();renderBar();renderRaw();renderStatus()}
+
+/* ---------- events: configuration ---------- */
+function byId(id){return FIELDS.filter(function(f){return f.sec+'.'+f.key===id})[0]}
+document.addEventListener('click',function(e){
+  var t=e.target.closest('[data-edit],[data-sw],[data-reset],[data-goto],[data-tab],#reloadcfg');if(!t)return;
+  if(t.id==='reloadcfg'){S.serverErr='';S.conflict=false;loadConfig(true);return}
+  if(t.dataset.edit){if(!canEdit())return;S.editing=t.dataset.edit;S.focusEdit=true;renderFields();return}
+  if(t.dataset.sw){if(!canEdit())return;var f=byId(t.dataset.sw);setField(f,!fieldValue(S.good,f).v);return}
+  if(t.dataset.reset){resetField(byId(t.dataset.reset));return}
+  if(t.dataset.goto){go(t.dataset.goto);return}
+  if(t.dataset.tab){go(t.dataset.tab)}
+});
+document.addEventListener('keydown',function(e){
+  var el=e.target;if(!el||el.id!=='inp')return;
+  var f=byId(el.dataset.f);
+  if(e.key==='Escape'){S.editing=null;renderFields();return}
+  if(e.key==='Enter'){e.preventDefault();var r=validateInput(f,el.value);if(r.err){$('inperr').textContent=r.err;return}setField(f,r.v)}
+});
+document.addEventListener('change',function(e){var el=e.target;if(el.id==='inp'&&el.tagName==='SELECT')setField(byId(el.dataset.f),el.value)});
+document.addEventListener('input',function(e){var el=e.target;if(el.id==='inp'&&el.tagName==='INPUT'){var r=validateInput(byId(el.dataset.f),el.value);$('inperr').textContent=r.err||''}});
+$('raw').addEventListener('input',function(){if(!canEdit())return;S.text=this.value;S.serverErr='';scheduleValidate();renderFields();renderBar();renderRaw()});
+$('raw').addEventListener('scroll',function(){$('gutter').scrollTop=this.scrollTop});
+$('raw').addEventListener('keydown',function(e){if(e.key==='Tab'&&canEdit()){e.preventDefault();this.setRangeText('    ',this.selectionStart,this.selectionEnd,'end');this.dispatchEvent(new Event('input'))}});
+$('diffbtn').onclick=function(){S.showDiff=!S.showDiff;if(S.showDiff&&S.tab!=='configuration')go('configuration');renderBar()};
+$('discard').onclick=function(){S.text=S.saved;S.editing=null;S.showDiff=false;S.serverErr='';render();toast('Changes discarded')};
+$('save').onclick=function(){
+  if(S.saving||parseToml(S.text).errors.length)return;
+  S.saving=true;renderBar();
+  api('/api/config',{method:'PUT',body:{text:S.text,etag:CF.etag}}).then(function(res){
+    CF=res;S.saved=res.text;S.text=res.text;S.showDiff=false;S.serverErr='';S.conflict=false;S.saving=false;render();
+    toast(res.etag!==res.applied_etag?'Saved config.toml. It takes effect after a restart.':'Saved config.toml.');
+  }).catch(function(e){S.saving=false;if(e.status!==401){S.serverErr=e.message;S.conflict=e.status===409}render()});
+};
+$('remountbtn').onclick=function(){
+  var b=$('remountbtn');b.disabled=true;$('mounttext').textContent='Restarting…';$('mountpill').className='pill warn';
+  api('/api/restart',{method:'POST'}).then(function(){waitForRestart()}).catch(function(e){b.disabled=false;showApiError(e.message)});
+};
+function waitForRestart(){
+  var tries=0,gone=false;
+  (function poll(){
+    if(++tries>120){showApiError('The process did not come back within 2 minutes. Check its supervisor (for Docker: the restart policy).');return}
+    fetch('/api/info',{cache:'no-store'}).then(function(r){if(r.ok&&(gone||tries>8)){location.reload();return}setTimeout(poll,1000)}).catch(function(){gone=true;setTimeout(poll,1000)});
+  })();
+}
+
+/* ---------- tabs ---------- */
+var TABS=['status','configuration','performance','load','config-toml'];
+function go(name,fromHash){
+  if(TABS.indexOf(name)<0)name='status';S.tab=name;
+  TABS.forEach(function(t){$('p-'+t).hidden=t!==name;var b=$('tab-'+t);b.setAttribute('aria-selected',String(t===name));b.tabIndex=t===name?0:-1});
+  if(!fromHash){try{history.replaceState(null,'','#'+name)}catch(e){location.hash=name}}
+  renderBar();if(name==='performance'||name==='load')pollMetrics();drawCharts();
+}
+window.addEventListener('hashchange',function(){go(location.hash.slice(1),true)});
+$('tab-status').parentNode.addEventListener('keydown',function(e){var i=TABS.indexOf(S.tab);if(e.key==='ArrowRight')go(TABS[(i+1)%TABS.length]);else if(e.key==='ArrowLeft')go(TABS[(i+TABS.length-1)%TABS.length]);else return;$('tab-'+S.tab).focus()});
+
+/* ---------- charts ---------- */
+function nice(max){var p=Math.pow(10,Math.floor(Math.log10(max||1))),m=max/p;return(m<=2?2:m<=4?4:m<=8?8:10)*p}
+function fmt(v){return v>=10||v===Math.floor(v)?v.toFixed(0):v.toFixed(1)}
+function spanLabel(t){if(!t||t.length<2)return '';var s=Math.round((t[t.length-1]-t[0])/1000);return s>=3600?'-'+Math.round(s/60)+'m':s>=90?'-'+Math.round(s/60)+'m':'-'+s+'s'}
+function plot(el,o){
+  var w=Math.max(260,el.clientWidth),h=el.clientHeight||190,L=40,Rr=10,T=10,B=22,iw=w-L-Rr,ih=h-T-B,series=o.series,n=series[0].length;
+  if(!n){el.innerHTML='<div class="empty" style="padding:70px 0;text-align:center">Collecting samples… the first point appears after about 20 seconds.</div>';return}
+  var flat=[].concat.apply([],series).filter(function(v){return v!=null});
+  var tops=o.stack?series[0].map(function(_,i){return series.reduce(function(a,s){return a+(s[i]||0)},0)}):flat;
+  var ymax=o.yMax||nice(Math.max.apply(null,tops.concat([o.ref||0,0.0001]))*1.08);
+  var X=function(i){return L+(n>1?i*iw/(n-1):iw/2)},Y=function(v){return T+ih-Math.min(v,ymax)/ymax*ih};
+  var svg='<svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="'+esc(o.label)+'">';
+  for(var k=0;k<=4;k++){var yv=ymax*k/4,y=Y(yv);svg+='<line class="grid" x1="'+L+'" x2="'+(w-Rr)+'" y1="'+y+'" y2="'+y+'"/><text x="'+(L-6)+'" y="'+(y+3.5)+'" text-anchor="end">'+fmt(yv)+'</text>'}
+  if(o.span&&n>1){svg+='<text x="'+L+'" y="'+(h-6)+'" text-anchor="start">'+o.span+'</text><text x="'+(w-Rr)+'" y="'+(h-6)+'" text-anchor="end">now</text>'}
+  if(o.stack){var base=new Array(n).fill(0);series.forEach(function(s,si){var top=s.map(function(v,i){return base[i]+(v||0)});
+    if(n===1){var bw=Math.min(40,iw/2);svg+='<rect class="area f'+(si+1)+'" x="'+(X(0)-bw/2)+'" y="'+Y(top[0])+'" width="'+bw+'" height="'+(Y(base[0])-Y(top[0]))+'"/>'}
+    else{var d='M'+X(0)+' '+Y(base[0]);for(var i=0;i<n;i++)d+=' L'+X(i)+' '+Y(top[i]);for(i=n-1;i>=0;i--)d+=' L'+X(i)+' '+Y(base[i]);svg+='<path class="area f'+(si+1)+'" d="'+d+'Z"/>'}
+    base=top})}
+  else series.forEach(function(s,si){var d='',pen=false,last=-1,col=o.colors?o.colors[si]:si+1;
+    s.forEach(function(v,i){if(v==null){pen=false;return}d+=(pen?' L':' M')+X(i).toFixed(1)+' '+Y(v).toFixed(1);pen=true;last=i});
+    svg+='<path class="ln s'+col+'" d="'+d+'"/>';if(last>=0)svg+='<circle cx="'+X(last)+'" cy="'+Y(s[last])+'" r="3.4" class="f'+col+'"/>'});
+  if(o.ref!=null){var ry=Y(o.ref);svg+='<line class="refl" x1="'+L+'" x2="'+(w-Rr)+'" y1="'+ry+'" y2="'+ry+'"/>'+(o.refLabel?'<text class="reft" x="'+(L+6)+'" y="'+(ry+13)+'">'+esc(o.refLabel)+'</text>':'')}
+  el.innerHTML=svg+'</svg>';
+}
+function bars(el,vals,colors,labels,unit){
+  if(!vals.length){el.innerHTML='<div class="empty" style="padding:70px 0;text-align:center">No pass has finished since the start. Reading a file that is not cached starts one.</div>';return}
+  var w=Math.max(260,el.clientWidth),h=el.clientHeight||190,L=40,Rr=10,T=10,B=22,iw=w-L-Rr,ih=h-T-B,ymax=nice(Math.max.apply(null,vals.concat([0.0001]))*1.1),bw=iw/Math.max(vals.length,6);
+  var svg='<svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="Pass duration in '+unit+'">';
+  for(var k=0;k<=4;k++){var y=T+ih-ih*k/4;svg+='<line class="grid" x1="'+L+'" x2="'+(w-Rr)+'" y1="'+y+'" y2="'+y+'"/><text x="'+(L-6)+'" y="'+(y+3.5)+'" text-anchor="end">'+fmt(ymax*k/4)+'</text>'}
+  vals.forEach(function(v,i){var bh=Math.max(2,v/ymax*ih),x=L+i*bw+bw*.18;svg+='<rect class="'+colors[i]+'" x="'+x+'" y="'+(T+ih-bh)+'" width="'+bw*.64+'" height="'+bh+'" rx="2"/>';if(vals.length<9||i%2===0)svg+='<text x="'+(x+bw*.32)+'" y="'+(h-6)+'" text-anchor="middle">'+labels[i]+'</text>'});
+  svg+='<text x="'+(w-Rr)+'" y="'+(T+8)+'" text-anchor="end">'+unit+'</text>';
+  el.innerHTML=svg+'</svg>';
+}
+function stats(a){a=a.filter(function(v){return v!=null});if(!a.length)return null;var s=a.slice().sort(function(x,y){return x-y});return{avg:a.reduce(function(x,y){return x+y},0)/a.length,p95:s[Math.min(s.length-1,Math.floor(s.length*.95))],max:s[s.length-1],min:s[0],last:a[a.length-1]}}
+var GROUPS=['xz','itch_tob','datafeedfs-go','ssh','other'];
+$('lg-cpu').innerHTML=GROUPS.map(function(g,i){return '<span><i style="background:var(--c'+(i+1)+')"></i>'+g+'</span>'}).join('');
+function drawCharts(){
+  if(!MT||(S.tab!=='performance'&&S.tab!=='load'))return;
+  var sp=spanLabel(MT.t),when='Updated '+clock(Date.now())+(S.paused?' · paused':'');
+  $('unsup-p').hidden=$('unsup-l').hidden=MT.host.supported;
+  if(S.tab==='performance'){
+    plot($('c-net'),{series:[MT.net_mbs],label:'Network received, MB/s',span:sp});
+    plot($('c-hit'),{series:[MT.hit_ratio],yMax:100,label:'Cache hit ratio, percent',span:sp,colors:[2]});
+    plot($('c-dsk'),{series:[MT.cache_write_mbs],label:'Cache writes, MB/s',span:sp,colors:[3]});
+    var a=stats(MT.net_mbs),b=stats(MT.hit_ratio),c=stats(MT.cache_write_mbs);
+    $('now-net').textContent=a?a.last.toFixed(1)+' MB/s':'';$('st-net').textContent=a?'avg '+a.avg.toFixed(1)+' · p95 '+a.p95.toFixed(1)+' · min '+a.min.toFixed(1)+' MB/s ('+(a.last*8/1000).toFixed(2)+' Gbit/s now)':'';
+    $('now-hit').textContent=b?b.last.toFixed(0)+' %':'no reads yet';$('st-hit').textContent=b?'avg '+b.avg.toFixed(0)+' % · min '+b.min.toFixed(0)+' % (reads served without a pass; gaps have no reads)':'Reads served from the cache divided by all reads; gaps are intervals with no reads.';
+    $('now-dsk').textContent=c?c.last.toFixed(1)+' MB/s':'';$('st-dsk').textContent=c?'avg '+c.avg.toFixed(1)+' · p95 '+c.p95.toFixed(1)+' MB/s of parquet moved into the cache':'';
+    var passes=MT.passes.slice().reverse(),max=passes.reduce(function(m,p){return Math.max(m,p.seconds)},0),minutes=max>=120,unit=minutes?'min':'s';
+    bars($('c-dur'),passes.map(function(p){return minutes?p.seconds/60:p.seconds}),passes.map(function(p){return p.status==='failed'?'f6':'f'+({tick:1,orderbook:2,stream:3}[p.kind]||5)}),passes.map(function(p){return p.day.slice(5)}),unit);
+    var sorted=MT.passes.map(function(p){return p.seconds}).sort(function(x,y){return x-y});$('now-dur').textContent=sorted.length?'median '+dur(sorted[Math.floor(sorted.length/2)]):'';
+    $('done').innerHTML=MT.passes.length?MT.passes.map(function(p){return '<tr><td class="mono">'+esc(p.kind+' '+p.day)+'</td><td class="num">'+p.symbols+'</td><td class="num">'+dur(p.seconds)+'</td><td><span class="pill '+(p.status==='ok'?'good':'bad')+'">'+esc(p.status)+'</span></td><td>'+clock(p.finished_ms)+'</td></tr>'}).join(''):'<tr><td colspan="5" class="empty">No pass has finished since the start.</td></tr>';
+    $('upd-p').textContent=when;
+  }else{
+    var cpu=GROUPS.map(function(g){return MT.cpu[g]||[]}),cores=MT.host.cpus||1;
+    plot($('c-cpu'),{series:cpu,stack:true,yMax:cores,ref:cores,refLabel:cores+' cores',label:'CPU cores busy by process group',span:sp});
+    plot($('c-lav'),{series:[MT.load1,MT.load15],ref:cores,refLabel:cores+' cores',label:'Load average',span:sp,colors:[1,3]});
+    var tot=MT.cpu_total.length?MT.cpu_total[MT.cpu_total.length-1]:0,l1=MT.load1.length?MT.load1[MT.load1.length-1]:0,mem=MT.mem_gib.length?MT.mem_gib[MT.mem_gib.length-1]:0;
+    $('now-cpu').textContent=MT.cpu_total.length?tot.toFixed(1)+' of '+cores+' cores':'';$('now-lav').textContent=MT.load1.length?l1.toFixed(1):'';
+    $('l-cpus').textContent=cores;$('l-ram').textContent=MT.host.mem_total_gib?MT.host.mem_total_gib.toFixed(0)+' GiB RAM':'';
+    $('l-cpu').textContent=MT.cpu_total.length?Math.round(tot/cores*100)+'%':'–';$('l-load').textContent=MT.load1.length?l1.toFixed(1):'–';
+    $('l-mem').textContent=MT.mem_gib.length?mem.toFixed(1)+' GiB':'–';$('l-memsub').textContent=MT.host.mem_total_gib?'of '+MT.host.mem_total_gib.toFixed(0)+' GiB':'';
+    if(MT.host.disk_total){var used=MT.host.disk_total-MT.host.disk_free;$('l-disk').textContent=Math.round(used/MT.host.disk_total*100)+'%';$('l-disksub').textContent=gib(MT.host.disk_free)+' free of '+gib(MT.host.disk_total)}
+    $('top').innerHTML=MT.processes.length?MT.processes.map(function(p){return '<tr><td class="mono">'+esc(p.name)+'</td><td class="mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis">'+esc(p.command)+'</td><td class="num">'+Math.round(p.cpu*100)+'%</td><td class="num">'+(p.rss_mb>=1000?(p.rss_mb/1000).toFixed(1)+' GB':Math.round(p.rss_mb)+' MB')+'</td></tr>'}).join(''):'<tr><td colspan="4" class="empty">Nothing is using CPU right now.</td></tr>';
+    $('upd-l').textContent=when;
+  }
+}
+['p','l'].forEach(function(k){
+  var box=$('range-'+k);box.innerHTML=[['5m','5 min'],['15m','15 min'],['1h','1 hour']].map(function(r){return '<button type="button" data-range="'+r[0]+'" aria-pressed="'+(r[0]===S.range)+'">'+r[1]+'</button>'}).join('');
+  box.onclick=function(e){var b=e.target.closest('[data-range]');if(!b)return;S.range=b.dataset.range;['p','l'].forEach(function(j){Array.prototype.forEach.call($('range-'+j).children,function(x){x.setAttribute('aria-pressed',String(x.dataset.range===S.range))})});pollMetrics()};
+});
+var rt;window.addEventListener('resize',function(){clearTimeout(rt);rt=setTimeout(drawCharts,120)});
+
+/* ---------- status ---------- */
+function renderStatus(){
+  if(!ST)return;
+  var m=ST.mount,c=ST.cache,p=ST.passes,l=ST.listing;
+  $('host').textContent=m.host+(m.mountpoint?' · '+m.mountpoint:'');
+  var pill=$('mountpill');
+  if(S.restarting){pill.className='pill warn';$('mounttext').textContent='Restarting…'}
+  else if(m.mountpoint){pill.className='pill good';$('mounttext').textContent='Mounted · read-only'}
+  else{pill.className='pill';$('mounttext').textContent='Console only · not mounted'}
+  var ep=$('editpill');ep.hidden=false;ep.className='pill'+(m.allow_edit?' acc':'');ep.textContent=m.allow_edit?'Editing on':'Read-only console';
+  $('s-run').textContent=p.running.length+' / '+p.slots;
+  $('s-wait').textContent=p.pending.length;$('s-fail').textContent=p.failed.length;
+  $('s-cache').textContent=bytes(c.bytes);
+  $('s-cache-sub').textContent=(c.limit_bytes?'of '+gib(c.limit_bytes)+' cap · ':'no cap · ')+c.files+' files';
+  $('s-up').textContent=dur(m.uptime_s);$('s-version').textContent='build '+m.version;
+  // cache by kind
+  var kinds=Object.keys(c.by_kind).sort(),scale=Math.max(c.limit_bytes||0,c.bytes,1),html='';
+  kinds.forEach(function(k,i){var b=c.by_kind[k].bytes;html+='<div style="display:grid;grid-template-columns:104px minmax(0,1fr) 84px;gap:12px;align-items:center;margin:8px 0" data-kind="'+esc(k)+'"><span class="mono">'+esc(k)+'</span><div class="bar"><span style="width:'+(b/scale*100)+'%;background:var(--c'+((i%3)+1)+')"></span></div><span class="mono" style="text-align:right">'+bytes(b)+'</span></div>'});
+  if(!kinds.length)html+='<div class="empty">'+(c.scanned_ms?'Nothing is cached yet.':'Measuring the cache…')+'</div>';
+  else{var over=c.limit_bytes&&c.bytes>c.limit_bytes;html+='<div style="display:grid;grid-template-columns:104px minmax(0,1fr) 84px;gap:12px;align-items:center;margin:14px 0 0;padding-top:12px;border-top:1px solid var(--line)"><b>total</b><div class="bar'+(c.limit_bytes?(over?' warn':' good'):'')+'"><span style="width:'+Math.min(100,c.bytes/scale*100)+'%"></span>'+(c.limit_bytes?'<em title="eviction target" style="left:'+(c.evict_to_bytes/scale*100)+'%"></em><em title="cap" style="left:'+Math.min(100,c.limit_bytes/scale*100)+'%"></em>':'')+'</div><span class="mono" style="text-align:right"><b>'+bytes(c.bytes)+'</b></span></div>'}
+  $('kinds').innerHTML=html;
+  $('scannote').textContent=(c.limit_bytes?'Markers: eviction target ('+gib(c.evict_to_bytes)+') and cap ('+gib(c.limit_bytes)+'). ':'No cap set: nothing is evicted. ')+(c.scanned_ms?'Last scan '+clock(c.scanned_ms)+(c.next_scan_ms?', next '+clock(c.next_scan_ms):'')+'. ':'')+'Evicted since start: '+c.evicted_files+' files, '+bytes(c.evicted_bytes)+'.';
+  // details
+  var rows=[['Mount point',m.mountpoint||'not mounted (console only)'],['Source',m.source],['Cache directory',c.dir],['Days listed',l.days==null?'not loaded yet (listed on first use)':l.days+' ('+l.first_day+' to '+l.last_day+')'],['Symbols listed',l.symbols==null?'not loaded yet':String(l.symbols)],['Queue policy',ST.settings.on_miss+' on miss'+(ST.settings.whole_day?', whole day':'')],['Orderbook depth',ST.settings.orderbook_depth+' levels per side']];
+  if(c.disk&&c.disk.total)rows.push(['Disk',gib(c.disk.free)+' free of '+gib(c.disk.total)]);
+  $('details').innerHTML=rows.map(function(r){return '<dt>'+esc(r[0])+'</dt><dd>'+esc(r[1])+'</dd>'}).join('');
+  // passes
+  var now=Date.now(),body=p.running.map(function(r){return '<tr><td class="mono">'+esc(r.kind+' '+r.day)+'</td><td class="num">'+r.symbols+'</td><td class="num">'+dur((now-r.started_ms)/1000)+'</td><td>'+clock(r.started_ms)+'</td></tr>'}).join('');
+  if(!p.running.length)body='<tr><td colspan="4" class="empty">No pass is running. Reading a file that is not cached starts one.</td></tr>';
+  if(p.pending.length)body+='<tr><td colspan="4" class="empty" style="white-space:normal">Waiting for a slot or the batch window: '+p.pending.map(function(x){return esc(x.kind+' '+x.day)+' ('+x.symbols+')'}).join(', ')+'</td></tr>';
+  $('passes').innerHTML=body;
+  $('fails').innerHTML=p.failed.length?p.failed.map(function(f){return '<div style="margin:6px 0"><span class="pill bad">failed</span> <span class="mono">'+esc(f.key)+'</span> <span style="color:var(--muted)">'+esc(f.message)+'</span></div>'}).join('')+'<p class="mockbar" style="margin:10px 0 0">A failed pass is retried the next time one of its files is opened.</p>':'<div class="empty">No failures since the start.</div>';
+  // slots on the load tab
+  var rowsS='';
+  for(var i=0;i<Math.min(p.slots,16);i++){var r=p.running[i];rowsS+=r?'<div style="display:grid;grid-template-columns:170px minmax(0,1fr) 84px;gap:12px;align-items:center;margin:8px 0"><span class="mono" style="font-size:12.5px">'+esc(r.kind+' '+r.day)+'</span><div class="bar good"><span style="width:100%"></span></div><span class="mono" style="text-align:right">'+dur((now-r.started_ms)/1000)+'</span></div>':'<div style="display:grid;grid-template-columns:170px minmax(0,1fr) 84px;gap:12px;align-items:center;margin:8px 0;color:var(--muted)"><span class="mono" style="font-size:12.5px">idle slot</span><div class="bar"></div><span class="mono" style="text-align:right">–</span></div>'}
+  $('slots').innerHTML=rowsS;$('slotnote').textContent=p.slots+' slot'+(p.slots===1?'':'s')+' from extract.max_parallel. Passes over the same day share one pass.'+(p.slots>16?' Showing the first 16.':'');
+  if(CF)renderBar();
+}
+
+/* ---------- loading and polling ---------- */
+function loadConfig(force){
+  return api('/api/config').then(function(c){
+    CF=c;$('cfgpath').textContent=c.path;$('rawpath').textContent=c.path.split('/').pop();
+    if(!S.loaded||force||S.text===S.saved){S.saved=c.text;S.text=c.text;S.serverErr=''}
+    else S.saved=c.text;
+    S.loaded=true;render();
+  });
+}
+function pollStatus(){return api('/api/status').then(function(s){ST=s;showApiError('');renderStatus()}).catch(function(e){if(e.status!==401)showApiError('Cannot reach the console API: '+e.message)})}
+function pollMetrics(){if(S.tab!=='performance'&&S.tab!=='load')return Promise.resolve();return api('/api/metrics?range='+S.range).then(function(m){MT=m;drawCharts()}).catch(function(){})}
+// polling interval: 3 s, or ?refresh=<seconds> (at least 0.25), for example to watch a pass that finishes in under 3 s
+function refreshMs(){var v=parseFloat(new URLSearchParams(location.search).get('refresh'));return v>=0.25?v*1000:3000}
+var timers=[];
+function start(){
+  timers.forEach(clearInterval);timers=[];
+  Promise.all([pollStatus(),loadConfig(false)]).then(function(){go(location.hash.slice(1)||'status',true)}).catch(function(e){if(e.status!==401)showApiError('Cannot load the console: '+e.message)});
+  timers.push(setInterval(function(){if(S.paused||document.hidden)return;pollStatus();pollMetrics()},refreshMs()));
+}
+$('livepill').onclick=function(){S.paused=!S.paused;this.textContent=S.paused?'Paused':'Live';drawCharts()};
+$('livepill').addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();this.click()}});
+fetch('/api/info',{cache:'no-store'}).then(function(r){return r.json()}).then(function(info){if(info.auth_required&&!TOKEN)showLock('');else start()}).catch(function(){start()});
+</script>
+</body>
+</html>

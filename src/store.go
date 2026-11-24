@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/parquet-go/parquet-go"
@@ -79,6 +80,16 @@ type Store struct {
 	symbolSet   map[string]bool
 	csvMutex    sync.Mutex
 
+	startedAt  time.Time
+	mountpoint string // set by mount; empty when serving the console without a mount
+	running    map[passKey]*runInfo
+	history    []passRecord
+	counters   counters
+	cacheStats atomic.Pointer[CacheStats]
+	nextScan   atomic.Int64 // unix milliseconds of the next cache scan
+	tel        *Telemetry
+	sampler    *Sampler
+
 	touchMutex sync.Mutex
 	touched    map[string]time.Time // path -> last access-time bump, so a hot file costs one metadata write per touch interval
 	evictPause time.Duration        // pause between batches of deletions
@@ -90,7 +101,9 @@ func NewStore(config *Config) (*Store, error) {
 		pending: map[passKey]map[string]*Future{}, firstRequest: map[passKey]time.Time{}, inflight: map[fileKey]*Future{},
 		runningDays: map[passKey]bool{}, failures: map[string]string{}, wake: make(chan struct{}, 1),
 		touched: map[string]time.Time{}, evictPause: 2 * time.Second,
+		startedAt: time.Now(), running: map[passKey]*runInfo{}, tel: newTelemetry(config),
 	}
+	store.tel.observe(store)
 	for _, name := range []string{"_symbols", "_logs", "_work"} {
 		if err := os.MkdirAll(filepath.Join(store.cache, name), 0o755); err != nil {
 			return nil, err
@@ -100,8 +113,8 @@ func NewStore(config *Config) (*Store, error) {
 		return nil, err
 	}
 	go store.scheduler()
-	if config.Cache.MaxGB > 0 {
-		go store.evictLoop()
+	if config.Cache.MaxGB > 0 || config.UI.Listen != "" || config.Telemetry.metricsOn() {
+		go store.evictLoop() // also measures the cache for the console and the gauges
 	}
 	return store, nil
 }
@@ -345,14 +358,20 @@ func (store *Store) Request(kind, symbol, day string) *Future {
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
 	if future := store.inflight[fileKey{kind, day, symbol}]; future != nil {
+		store.counters.misses.Add(1)
+		store.tel.request(kind, "joined")
 		return future
 	}
 	future := newFuture()
 	if _, err := os.Stat(path); err == nil {
 		store.touch(path)
+		store.counters.hits.Add(1)
+		store.tel.request(kind, "hit")
 		future.resolve(path, nil)
 		return future
 	}
+	store.counters.misses.Add(1)
+	store.tel.request(kind, "miss")
 	store.inflight[fileKey{kind, day, symbol}] = future
 	if store.pending[pass] == nil {
 		store.pending[pass] = map[string]*Future{}
@@ -417,7 +436,9 @@ func (store *Store) runBatch(pass passKey, batch map[string]*Future) {
 	store.mutex.Lock()
 	store.passCounter++
 	work := filepath.Join(store.cache, "_work", fmt.Sprintf("%s-%d-%d", day, os.Getpid(), store.passCounter))
+	store.running[pass] = &runInfo{kind: kind, day: day, symbols: len(symbols), started: started}
 	store.mutex.Unlock()
+	passContext, span := store.tel.startPass(kind, day, len(symbols))
 
 	err := func() error {
 		var missing []string // requested symbols that an earlier pass of this day did not already cache
@@ -446,8 +467,14 @@ func (store *Store) runBatch(pass passKey, batch map[string]*Future) {
 		if kind == kindOrderbook {
 			environment["DFS_DEPTH"] = fmt.Sprint(store.config.Orderbook.Depth)
 		}
-		if _, err := store.runPipeline(day, "extract", environment, false); err != nil {
-			return err
+		pipeline := store.tel.startPipeline(passContext, len(extract), store.config.Extract.WholeDay)
+		_, pipelineErr := store.runPipeline(day, "extract", environment, false)
+		if pipelineErr != nil {
+			pipeline.RecordError(pipelineErr)
+		}
+		pipeline.End()
+		if pipelineErr != nil {
+			return pipelineErr
 		}
 		requested := make(map[string]bool, len(symbols))
 		for _, symbol := range symbols {
@@ -465,10 +492,11 @@ func (store *Store) runBatch(pass passKey, batch map[string]*Future) {
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}
-			if _, err := os.Stat(produced); err == nil {
+			if info, err := os.Stat(produced); err == nil {
 				if err := moveFile(produced, target); err != nil {
 					return err
 				}
+				store.counters.written.Add(info.Size())
 			} else if err := writeEmpty(target, schemaFor(kind, store.config.Orderbook.Depth)); err != nil { // no activity that day: serve an empty table with the right columns
 				return err
 			}
@@ -496,12 +524,16 @@ func (store *Store) runBatch(pass passKey, batch map[string]*Future) {
 		}
 	}
 	delete(store.runningDays, pass)
+	delete(store.running, pass)
 	store.mutex.Unlock()
 	status := "ok"
 	if err != nil {
 		status = "failed"
 	}
-	log.Printf("%s pass over %s finished in %.0fs (%s)", kind, day, time.Since(started).Seconds(), status)
+	took := time.Since(started)
+	store.tel.finishPass(span, kind, len(symbols), took, err)
+	store.recordPass(passRecord{Kind: kind, Day: day, Symbols: len(symbols), Seconds: took.Seconds(), Status: status, Finished: time.Now()})
+	log.Printf("%s pass over %s finished in %.0fs (%s)", kind, day, took.Seconds(), status)
 	select {
 	case store.wake <- struct{}{}:
 	default:

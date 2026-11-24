@@ -47,10 +47,15 @@ func (store *Store) touch(path string) {
 	os.Chtimes(path, now, now) // best effort: a failure only makes the file look older
 }
 
-// scanCache lists the parquet and csv files of every kind directory (not _work, _logs, _symbols) and their total size.
+// scanCache lists the parquet and csv files of every kind directory (not _work, _logs, _symbols), their total size, and the sizes per kind.
 func (store *Store) scanCache() ([]cacheFile, int64) {
 	var files []cacheFile
 	var total int64
+	stats := &CacheStats{At: time.Now(), ByKind: map[string]kindStat{}}
+	defer func() {
+		stats.Bytes, stats.Files = total, len(files)
+		store.cacheStats.Store(stats)
+	}()
 	entries, err := os.ReadDir(store.cache)
 	if err != nil {
 		return nil, 0
@@ -59,6 +64,7 @@ func (store *Store) scanCache() ([]cacheFile, int64) {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), "_") {
 			continue
 		}
+		entryName := entry.Name()
 		filepath.WalkDir(filepath.Join(store.cache, entry.Name()), func(path string, entry fs.DirEntry, err error) error {
 			if err != nil || entry.IsDir() || !(strings.HasSuffix(path, ".parquet") || strings.HasSuffix(path, ".csv")) {
 				return nil
@@ -69,6 +75,10 @@ func (store *Store) scanCache() ([]cacheFile, int64) {
 			}
 			files = append(files, cacheFile{path, info.Size(), info.ModTime()})
 			total += info.Size()
+			kind := stats.ByKind[entryName]
+			kind.Bytes += info.Size()
+			kind.Files++
+			stats.ByKind[entryName] = kind
 			return nil
 		})
 	}
@@ -111,6 +121,12 @@ func (store *Store) evictOnce() (deletedFiles int, deletedBytes, found int64) {
 			time.Sleep(store.evictPause) // gradual: never a burst of deletions
 		}
 	}
+	store.counters.evictedFiles.Add(int64(deletedFiles))
+	store.counters.evictedBytes.Add(deletedBytes)
+	store.tel.evicted(deletedFiles, deletedBytes)
+	if deletedFiles > 0 {
+		store.scanCache() // refresh the per-kind sizes the console and the gauges show
+	}
 	if total > target {
 		log.Printf("cache: %.1f GiB is over the cap of %.1f GiB but the rest was used within %s or is too small to evict",
 			float64(total)/(1<<30), store.config.Cache.MaxGB, minAge)
@@ -132,9 +148,16 @@ func (store *Store) pruneTouched() {
 }
 
 func (store *Store) evictLoop() {
-	ticker := time.NewTicker(time.Duration(store.config.Cache.ScanIntervalSeconds * float64(time.Second)))
-	defer ticker.Stop()
-	for range ticker.C {
+	interval := time.Duration(store.config.Cache.ScanIntervalSeconds * float64(time.Second))
+	first := interval
+	if first > 5*time.Second {
+		first = 5 * time.Second // measure soon after start so the console and the gauges have numbers
+	}
+	timer := time.NewTimer(first)
+	defer timer.Stop()
+	for range timer.C {
+		store.nextScan.Store(time.Now().Add(interval).UnixMilli())
+		timer.Reset(interval)
 		started := time.Now()
 		files, bytes, found := store.evictOnce()
 		if files > 0 {

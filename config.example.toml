@@ -30,3 +30,17 @@ batch_window_seconds = 3.0   # requests for the same day inside this window shar
 max_parallel = 2             # passes over different days at once
 on_miss = "block"            # "block" or "async" (open() fails with EAGAIN and extraction continues in the background)
 whole_day = false            # true: a miss extracts every symbol of that day in one pass, so the pcap is read once per day (more disk, much less I/O)
+
+# Web console (status, configuration, performance, load) on http://HOST:PORT. Off unless listen is set. See README, "Web console".
+# [ui]
+# listen = "127.0.0.1:8088"   # a non-loopback address requires a token
+# allow_edit = false          # true: the console can save this file (whoever can save it can change parser.command)
+# allow_restart = false       # true: a Restart now button stops the process so its supervisor restarts it with the saved config
+# token = ""
+
+# OpenTelemetry export (OTLP/HTTP): metrics and one trace per extraction pass. Off by default. See README, "OpenTelemetry".
+# [telemetry]
+# enabled = true
+# endpoint = "http://otel-collector:4318"   # empty: OTEL_EXPORTER_OTLP_ENDPOINT or http://localhost:4318
+# service_name = "datafeedfs"
+# metrics_interval_seconds = 15

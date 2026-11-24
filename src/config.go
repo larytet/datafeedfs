@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -46,7 +48,30 @@ type CacheConfig struct {
 	MinAgeSeconds        float64 `toml:"min_age_seconds"`        // files used more recently than this are never evicted (default and floor: touch interval)
 }
 
+// TelemetryConfig turns on OpenTelemetry export (OTLP over HTTP): metrics and one trace per extraction pass. Off by default; with it off
+// the instruments are no-ops. Standard OTEL_EXPORTER_OTLP_* environment variables (headers, certificates, timeouts) are honoured by the exporters.
+type TelemetryConfig struct {
+	Enabled                bool    `toml:"enabled"`
+	Endpoint               string  `toml:"endpoint"`                 // OTLP/HTTP base URL, e.g. http://collector:4318; empty: OTEL_EXPORTER_OTLP_ENDPOINT or http://localhost:4318
+	ServiceName            string  `toml:"service_name"`             // default datafeedfs
+	MetricsIntervalSeconds float64 `toml:"metrics_interval_seconds"` // default 15
+	Metrics                *bool   `toml:"metrics"`                  // default true
+	Traces                 *bool   `toml:"traces"`                   // default true
+}
+
+// UIConfig serves the web console (status, configuration, performance, load). Off unless Listen is set.
+type UIConfig struct {
+	Listen       string `toml:"listen"`        // host:port, for example 127.0.0.1:8088; empty = no web console
+	AllowEdit    bool   `toml:"allow_edit"`    // let the console save config.toml: whoever can save it can make the parser command run anything
+	AllowRestart bool   `toml:"allow_restart"` // let the console stop the process so its supervisor (docker restart policy) starts it with the saved config
+	Token        string `toml:"token"`         // bearer token for /api; required when Listen is not a loopback address
+}
+
 type Config struct {
+	Path           string // the file this was read from (empty when parsed from memory)
+	Raw            []byte // its content at load time: what the running process was started with
+	Telemetry      TelemetryConfig
+	UI             UIConfig
 	Remote         RemoteConfig
 	Parser         ParserConfig
 	CacheDir       string
@@ -68,6 +93,8 @@ type rawConfig struct {
 	} `toml:"cache"`
 	Extract        ExtractConfig   `toml:"extract"`
 	Orderbook      OrderbookConfig `toml:"orderbook"`
+	Telemetry      TelemetryConfig `toml:"telemetry"`
+	UI             UIConfig        `toml:"ui"`
 	DaysTTLSeconds *float64        `toml:"days_ttl_seconds"`
 }
 
@@ -87,6 +114,11 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ParseConfig(data, path)
+}
+
+// ParseConfig validates and parses config text. path is only used for error messages and to resolve a relative parser command.
+func ParseConfig(data []byte, path string) (*Config, error) {
 	var raw rawConfig
 	if err := toml.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
@@ -112,7 +144,7 @@ func LoadConfig(path string) (*Config, error) {
 			command[0] = candidate
 		}
 	}
-	config := &Config{Remote: raw.Remote, CacheDir: expandHome(raw.Cache.Dir), Extract: raw.Extract, Orderbook: raw.Orderbook, DaysTTLSeconds: 600}
+	config := &Config{Path: path, Raw: data, Telemetry: raw.Telemetry, UI: raw.UI, Remote: raw.Remote, CacheDir: expandHome(raw.Cache.Dir), Extract: raw.Extract, Orderbook: raw.Orderbook, DaysTTLSeconds: 600}
 	config.Cache = raw.Cache.CacheConfig
 	config.Parser = ParserConfig{Command: command, Env: map[string]string{}}
 	for key, value := range raw.Parser.Env {
@@ -141,6 +173,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if config.Orderbook.Depth < 1 || config.Orderbook.Depth > maxDepth {
 		return nil, fmt.Errorf("%s: orderbook.depth must be between 1 and %d", path, maxDepth)
+	}
+	if err := config.Telemetry.normalize(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if err := config.UI.normalize(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := config.Cache.normalize(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
@@ -191,4 +229,52 @@ func (cache *CacheConfig) normalize() error {
 		cache.MinAgeSeconds = cache.TouchIntervalSeconds // a file read inside the touch window must not look idle
 	}
 	return nil
+}
+
+func (telemetry *TelemetryConfig) normalize() error {
+	if telemetry.ServiceName == "" {
+		telemetry.ServiceName = "datafeedfs"
+	}
+	if telemetry.MetricsIntervalSeconds == 0 {
+		telemetry.MetricsIntervalSeconds = 15
+	}
+	if telemetry.MetricsIntervalSeconds < 0 {
+		return fmt.Errorf("telemetry.metrics_interval_seconds must be positive")
+	}
+	if telemetry.Endpoint != "" {
+		parsed, err := url.Parse(telemetry.Endpoint)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("telemetry.endpoint must be an http:// or https:// URL, for example http://collector:4318")
+		}
+	}
+	return nil
+}
+
+func (telemetry *TelemetryConfig) metricsOn() bool {
+	return telemetry.Enabled && (telemetry.Metrics == nil || *telemetry.Metrics)
+}
+func (telemetry *TelemetryConfig) tracesOn() bool {
+	return telemetry.Enabled && (telemetry.Traces == nil || *telemetry.Traces)
+}
+
+func (ui *UIConfig) normalize() error {
+	if ui.Listen == "" {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(ui.Listen)
+	if err != nil {
+		return fmt.Errorf("ui.listen must be host:port, for example 127.0.0.1:8088: %w", err)
+	}
+	if !isLoopbackHost(host) && ui.Token == "" {
+		return fmt.Errorf("ui.listen %q is not a loopback address: set ui.token, the console shows the config and can change it", ui.Listen)
+	}
+	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

@@ -265,13 +265,18 @@ func (node *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, ui
 	if flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0 {
 		return nil, 0, syscall.EROFS
 	}
+	started := time.Now()
 	for attempt := 0; ; attempt++ {
 		future := node.store.Request(node.kind, node.symbol, node.day)
+		hit := future.Done()
 		if node.store.config.Extract.OnMiss == "async" && !future.Done() {
 			return nil, 0, syscall.EAGAIN // extraction continues in the background; retry later or watch /.status
 		}
 		if _, err := future.Wait(); err != nil {
 			return nil, 0, syscall.EIO
+		}
+		if attempt == 0 {
+			node.store.tel.open(node.kind, hit, time.Since(started))
 		}
 		path := node.store.ParquetPath(node.kind, node.symbol, node.day)
 		if node.extension == "csv" {

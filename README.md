@@ -188,6 +188,60 @@ By default the cache grows without bound. Set `[cache] max_gb` to cap the parque
 - Never evicted: files used in the last hour (`min_age_seconds`, never below the touch interval) and files under 16 KiB. The latter are the empty tables that mark a day as extracted; deleting one would cost a whole pass over the pcap.
 - An evicted file is simply a cache miss: the next read extracts it again, which costs a pass over that day's pcap, not just that file.
 
+## Web console
+
+Set `[ui] listen` (for example `127.0.0.1:8088`) and the mount process serves a console in the browser, or run `datafeedfs-go serve CONFIG` to serve it without a mount. Four tabs and the raw file:
+
+- **Status**: passes running and waiting, failures, the cache by kind against the cap and the eviction target, mount details.
+- **Configuration**: every setting of `config.toml` as a form. Click a value to edit it, Enter applies it to the form, Esc cancels. Nothing is written until **Save config.toml**; **Review changes** shows a diff.
+- **Performance**: network received, cache hit ratio, durations of recent passes, cache writes.
+- **Load**: CPU by process group, load average, extraction slots, the busiest processes, memory and disk.
+- **config.toml**: the raw file with line numbers. It is the same text as the form: an edit in one shows in the other, and form edits keep your comments.
+
+It follows the browser's light or dark theme and has no external dependencies (one embedded page, no fonts or scripts from other sites).
+
+| `[ui]` setting | meaning |
+|---|---|
+| `listen` | `host:port`; empty (the default) turns the console off. A non-loopback address requires `token` |
+| `allow_edit` | `false` (default): the console is read-only. `true`: it can save `config.toml` |
+| `allow_restart` | `true` shows a **Restart now** button that stops the process so its supervisor (the Docker restart policy) starts it with the saved config |
+| `token` | bearer token for `/api`; the page asks for it |
+
+A saved config takes effect only after a restart: the page shows a banner while the file on disk differs from what the process started with. Saving rewrites the file the process was started with, so in Docker the config bind mount must not be `:ro`, and the console port must be published (for example `ports: ["127.0.0.1:8088:8088"]` with `listen = "0.0.0.0:8088"` and a `token`).
+
+Security: whoever can save the config can change `parser.command`, which the process runs. That is why editing is off by default, the default bind is loopback, a token is required off loopback, writes need an `X-Requested-With` header and a same-origin `Origin`, and without a token only `localhost` Host names are served (DNS rebinding). Keep `allow_edit` off unless you trust everyone who can reach the port.
+
+The page reads a small JSON API: `GET /api/status`, `/api/metrics?range=5m|15m|1h`, `/api/config`, `POST /api/config/validate`, `PUT /api/config`, `POST /api/restart`. Host figures (CPU, load, memory, network received) are read from `/proc` every 10 seconds and kept for an hour; on other platforms they are empty. In a container the CPU, load and memory are the host's and the network and processes are the container's. `?refresh=<seconds>` changes the 3 second poll interval.
+
+## OpenTelemetry
+
+Optional and off by default. With `[telemetry] enabled = true` the process exports metrics and one trace per extraction pass over OTLP/HTTP; with it off the instruments are no-ops. It is runtime config only: there is nothing to build differently.
+
+```toml
+[telemetry]
+enabled = true
+endpoint = "http://otel-collector:4318"   # base URL; empty uses OTEL_EXPORTER_OTLP_ENDPOINT or http://localhost:4318
+service_name = "datafeedfs"
+metrics_interval_seconds = 15
+# metrics = true, traces = true: set either to false to export only the other
+```
+
+The standard `OTEL_EXPORTER_OTLP_*` variables (headers, certificates, timeouts) are honoured by the exporters. Metrics (meter `datafeedfs`):
+
+| metric | type | attributes |
+|---|---|---|
+| `datafeedfs.cache.requests` | counter | `kind`, `result` = hit, miss, joined (a miss that was already being extracted) |
+| `datafeedfs.open.wait` | histogram, s | `kind`, `result` = hit, miss |
+| `datafeedfs.pass.duration` | histogram, s | `kind`, `status` = ok, failed |
+| `datafeedfs.pass.symbols` | histogram | `kind` |
+| `datafeedfs.passes` | counter | `kind`, `status` |
+| `datafeedfs.cache.evicted.files`, `.bytes` | counters | |
+| `datafeedfs.passes.running`, `.pending`, `.failed` | gauges | |
+| `datafeedfs.cache.bytes`, `.files` | gauges, as of the last cache scan | `kind` |
+| `datafeedfs.cache.limit` | gauge, bytes (0 = unlimited) | |
+
+Traces: a span `pass` per extraction pass (`kind`, `day`, `symbols.requested`, `status`, the error when it failed) with a child span `pipeline` around `ssh cat | decompress | decoder | ingest`. Individual reads are not traced. The decoder and `xz` are child processes and are not instrumented; host CPU and network belong to the collector's `hostmetrics` receiver.
+
 ## Parser contract
 
 `[parser] command` is run once per pass with the pcap, exactly as stored on the host, on stdin, and these environment variables:
@@ -216,4 +270,15 @@ go vet ./... && go test ./...
 
 `src/parser_test.go` builds a small pcap with a known order-book story (adds, partial execution, delete, replace, a non-displayed trade and a
 duplicated packet) and checks the parser output exactly; `src/ingest_test.go` checks the parquet and CSV writers. Both need `gcc` and `bash`.
-The end-to-end test (`e2e/run.sh`, plan in [testplan.md](testplan.md)) builds the image, serves a 5 MB synthetic pcap (Git LFS, made by `tools/genpcap`) from an sshd container and checks samples of the tick, orderbook and stream files.
+The browser tests of the web console (`e2e/ui`, Playwright) are described below. The end-to-end test (`e2e/run.sh`, plan in [testplan.md](testplan.md)) builds the image, serves a 5 MB synthetic pcap (Git LFS, made by `tools/genpcap`) from an sshd container and checks samples of the tick, orderbook and stream files.
+
+Browser tests of the web console (Playwright, needs Node 20 or newer, Go, gcc, xz and, for the extraction tests, FUSE):
+
+```
+cd e2e/ui
+npm ci
+npx playwright install chromium     # once; or set PW_CHROME=/usr/bin/google-chrome to use an installed Chrome
+npm test                            # builds the binary, starts two instances and runs 16 tests in about 40 seconds
+```
+
+One instance is the mounted filesystem with editing on: it checks the status page, a real extraction through the mount (a running pass, then cache), the charts, the light and dark theme, editing a field in place, the diff, saving to disk, the restart banner, the raw editor, server-side validation, and a save refused after the file changed on disk. The other is console-only with editing off and a token: it checks the token prompt, read-only fields and raw editor, and that the API refuses writes. Without FUSE the extraction checks are skipped and the instance runs without a mount.
