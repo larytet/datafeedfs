@@ -61,6 +61,19 @@ Names are lowercase letters, digits, `_` and `-`. Without any `[feeds.*]` table 
 The `cache` size cap, `max_parallel` and the batch window are shared by all feeds. The bundled parser decodes Nasdaq ITCH only: feeds in other protocols (CBOE PITCH, NYSE, IEX DEEP, ...) need a parser script
 that follows the contract below; it is told which feed it is running for in `DFS_FEED`, so one script can serve several.
 
+For the four Cboe US equities feeds (EDGA, EDGX, BYX, BZX) use `parsers/parse_cboe_pitch.sh`, which decodes PITCH:
+
+```toml
+[feeds.cboe_edga]
+parser = { command = "parsers/parse_cboe_pitch.sh", env = { DFS_PORT = "30101", DFS_LIST_STOP_AT = "36000" } }
+```
+
+PITCH differs from ITCH in two ways you will notice. It has no symbol directory, so the first listing of a day reads add orders: until the end of the pcap, or until `DFS_LIST_STOP_AT`
+(seconds since midnight, exchange time) if set, which is much cheaper but then misses symbols that first appear later. And a capture carries several units (the feed is split by symbol range), each with its own
+sequence number, so `seq` in the files is `unit << 32 | unit sequence`; it orders rows within a unit, not across units. Order Executed at Price/Size is event `C`, Modify Order is `U` (the old and new `ref` are the same order),
+non-displayed Trade is `P`. Auction summaries (the `X` rows of ITCH) are not decoded. The layouts are those of the PITCH spec as the tests encode them (`src/pitch_test.go`); check a first extraction
+against a known day before relying on it.
+
 ## Layout
 
 ```

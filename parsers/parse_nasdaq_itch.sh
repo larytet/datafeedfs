@@ -12,6 +12,7 @@
 #                              stream     every order message as it came (add, execute, cancel, delete, replace, trade, cross), no book
 #           DFS_DEPTH        optional: levels per side of the orderbook kind (default 5)
 #           DFS_PORT         optional UDP destination port of the feed (default: any port in the pcap)
+#           DFS_PROTOCOL     optional: itch (default) or pitch (Cboe US equities); parse_cboe_pitch.sh sets it
 #           DFS_STOP_AT      optional: stop decoding at this many seconds since midnight (exchange time), for short tests; 14520 = 04:02, the first 2 minutes of the feed
 #           DFS_INGEST       command that writes the parquet files from itch_tob records (default: datafeedfs-go ingest; datafeedfs sets it)
 #   list    print the symbols of the day, one per line, and exit
@@ -24,8 +25,10 @@ case "$DFS_PCAP_NAME" in
     *.gz) decompress=(gzip -dc) ;;
     *) decompress=(cat) ;;
 esac
+protocol=(--protocol "${DFS_PROTOCOL:-itch}")
 if [ "$DFS_MODE" = list ]; then
-    "${decompress[@]}" | "$here/itch_tob" --list-symbols 2>/dev/null
+    # PITCH has no symbol directory, so its list pass reads add orders to the end of the pcap, or up to DFS_LIST_STOP_AT seconds since midnight
+    "${decompress[@]}" | "$here/itch_tob" --list-symbols "${protocol[@]}" --port "${DFS_PORT:-0}" ${DFS_LIST_STOP_AT:+--stop-at "$DFS_LIST_STOP_AT"} 2>/dev/null
     exit "${PIPESTATUS[1]}"   # the decompressor dies of SIGPIPE once the directory is read; that is expected
 fi
 case "${DFS_KIND:-tick}" in
@@ -36,7 +39,7 @@ case "${DFS_KIND:-tick}" in
 esac
 read -ra ingest <<< "${DFS_INGEST:-datafeedfs-go ingest}"
 "${decompress[@]}" \
-    | "$here/itch_tob" --symbols-file "$DFS_SYMBOLS_FILE" --out - --port "${DFS_PORT:-0}" --table-bits "${DFS_TABLE_BITS:-22}" "${decoder_args[@]}" ${DFS_STOP_AT:+--stop-at "$DFS_STOP_AT"} \
+    | "$here/itch_tob" --symbols-file "$DFS_SYMBOLS_FILE" --out - "${protocol[@]}" --port "${DFS_PORT:-0}" --table-bits "${DFS_TABLE_BITS:-22}" "${decoder_args[@]}" ${DFS_STOP_AT:+--stop-at "$DFS_STOP_AT"} \
     | "${ingest[@]}" "${ingest_args[@]}" "$DFS_DATE" "$DFS_SYMBOLS_FILE" "$DFS_OUT_DIR"
 status=("${PIPESTATUS[@]}")
 # with DFS_STOP_AT the decoder stops early and the decompressor dies of SIGPIPE: that is expected, any other stage must succeed

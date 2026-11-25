@@ -10,6 +10,8 @@ pcap_path = "/data/pcaps/{yyyy}/{mm}/{dd}/nasdaq_itch.pcap.xz"
 # [feeds.nasdaq_tv]
 # [feeds.cboe_edga]
 # pcap_path = "/data/pcaps/{yyyy}/{mm}/{dd}/edga.pcap.xz"       # optional per-feed override (also ssh_host, ssh_options, [feeds.NAME.parser])
+# [feeds.cboe_edga.parser]                                       # Cboe PITCH feeds need their own parser
+# command = "parsers/parse_cboe_pitch.sh"
 # See README, "Feeds".
 
 [parser]

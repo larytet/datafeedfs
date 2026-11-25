@@ -8,6 +8,10 @@
  * With --events a record is an EventRecord (44 bytes): every order message of the chosen symbols as it came, no book (see EventRecord for the fields).
  *        xz -dc day.pcap.xz | itch_tob --list-symbols      prints the symbols of the day's stock directory, one per line, then stops
  * Duplicate packets (A/B feeds, retransmits) are dropped by MoldUDP64 sequence number.
+ * --protocol pitch decodes Cboe US equities PITCH (EDGA, EDGX, BYX, BZX) instead: little-endian Sequenced Unit Headers, several units each with its own
+ * sequence number, which is dropped when a packet repeats. The record's seq is (unit << 32 | unit sequence). PITCH has no symbol directory: --list-symbols reads add
+ * orders until the end of the pcap (or --stop-at) and prints the symbols it saw, sorted. Order Executed at Price/Size is event 'C', Modify is 'U' with the
+ * same order id on both sides, Trade (non-displayed) is 'P'. Auction summaries ('Q' / cross rows) are not decoded.
  */
 #define _GNU_SOURCE
 #include <stdint.h>
@@ -69,6 +73,11 @@ static int list_mode, stop_requested;
 static uint64_t cur_itch_ns, cur_seq, rows_written;
 static uint64_t rows_by_event[MAX_SYMBOLS][3];  /* Q, T, X */
 static uint64_t anomalies_missing_level;
+static int pitch;           /* --protocol pitch */
+static uint64_t cur_base_ns;            /* PITCH: seconds since midnight of the last Time message, in ns */
+static uint64_t sym_keys[1 << 14];      /* PITCH: packed symbol -> index in books + 1 (open addressing) */
+static uint16_t sym_vals[1 << 14];
+static uint64_t list_keys[1 << 16];     /* PITCH --list-symbols: every packed symbol seen */
 
 static void normalise(char *name) {  /* ITCH writes class shares as 'BRK B', Polygon as 'BRK.B' or 'BRK-B' */
     for (; *name; name++) if (*name == ' ' || *name == '-') *name = '.';
@@ -78,6 +87,9 @@ static inline uint16_t be16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[
 static inline uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 static inline uint64_t be48(const uint8_t *p) { return (uint64_t)be16(p) << 32 | be32(p + 2); }
 static inline uint64_t be64(const uint8_t *p) { return (uint64_t)be32(p) << 32 | be32(p + 4); }
+static inline uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
+static inline uint32_t le32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+static inline uint64_t le64(const uint8_t *p) { return (uint64_t)le32(p + 4) << 32 | le32(p); }
 
 static inline uint64_t hash_ref(uint64_t ref) { return (ref * 0x9E3779B97F4A7C15ULL) >> (64 - table_bits); }
 
@@ -321,6 +333,168 @@ static void handle_message(const uint8_t *m, int length) {
     }
 }
 
+/* ----- Cboe PITCH ------------------------------------------------------------------------------------------------------------ */
+
+/* The symbol field (6 or 8 characters, space padded) as one integer: trailing blanks dropped, ' ' and '-' written as '.', like normalise(). */
+static uint64_t symbol_key(const uint8_t *p, int n) {
+    while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == 0)) n--;
+    uint64_t key = 0;
+    for (int i = 0; i < n; i++) key = key << 8 | (p[i] == ' ' || p[i] == '-' ? '.' : p[i]);
+    return key;
+}
+
+static void key_name(uint64_t key, char *name) {
+    int n = 0;
+    char reversed[9];
+    for (; key; key >>= 8) reversed[n++] = (char)(key & 0xff);
+    for (int i = 0; i < n; i++) name[i] = reversed[n - 1 - i];
+    name[n] = 0;
+}
+
+static inline uint64_t key_slot(uint64_t key, int bits) { return (key * 0x9E3779B97F4A7C15ULL) >> (64 - bits); }
+
+static void index_symbols(void) {
+    for (int s = 0; s < symbol_count; s++) {
+        uint64_t key = symbol_key((const uint8_t *)books[s].name, (int)strlen(books[s].name));
+        uint64_t slot = key_slot(key, 14);
+        while (sym_keys[slot] && sym_keys[slot] != key) slot = (slot + 1) & ((1 << 14) - 1);
+        sym_keys[slot] = key; sym_vals[slot] = (uint16_t)(s + 1);
+    }
+}
+
+static int lookup_symbol(const uint8_t *p, int n) {
+    uint64_t key = symbol_key(p, n);
+    if (!key) return -1;
+    uint64_t slot = key_slot(key, 14);
+    while (sym_keys[slot]) {
+        if (sym_keys[slot] == key) return sym_vals[slot] - 1;
+        slot = (slot + 1) & ((1 << 14) - 1);
+    }
+    return -1;
+}
+
+static void note_symbol(const uint8_t *p, int n) {
+    uint64_t key = symbol_key(p, n);
+    if (!key) return;
+    uint64_t slot = key_slot(key, 16);
+    while (list_keys[slot] && list_keys[slot] != key) slot = (slot + 1) & ((1 << 16) - 1);
+    list_keys[slot] = key;
+}
+
+static int compare_names(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+
+static void print_listed_symbols(void) {
+    static char names[1 << 16][9];
+    int count = 0;
+    for (int slot = 0; slot < (1 << 16); slot++) if (list_keys[slot]) key_name(list_keys[slot], names[count++]);
+    qsort(names, (size_t)count, sizeof names[0], compare_names);
+    for (int i = 0; i < count; i++) puts(names[i]);
+}
+
+static uint32_t price_long(uint64_t px) { return px > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)px; }  /* 1/10000 dollar already */
+static uint32_t price_short(uint16_t px) { return (uint32_t)px * 100; }                             /* 1/100 dollar */
+
+/* m points at the length byte: m[0] length, m[1] type, m[2..5] nanoseconds since the last Time message, then the fields of the message. */
+static void add_order(const uint8_t *m, int sym, uint8_t side, uint32_t px, uint32_t shares) {
+    uint64_t ref = le64(m + 6);
+    order_insert(ref, (uint16_t)sym, side, px, shares);
+    emit_event('A', (uint16_t)sym, ref, 0, side, px, shares);
+    side_add(book_side(&books[sym], side), px, shares, side_ascending(side));
+    check_quote((uint16_t)sym);
+}
+
+static void pitch_trade(int sym, uint8_t side, uint32_t px, uint32_t shares) {
+    emit_event('P', (uint16_t)sym, 0, 0, side, px, shares);
+    emit('T', (uint16_t)sym, px, shares);
+}
+
+static void handle_pitch_message(const uint8_t *m, int length) {
+    uint8_t type = m[1];
+    if (type == 0x20) { if (length >= 6) cur_base_ns = (uint64_t)le32(m + 2) * 1000000000ULL; return; }  /* Time */
+    if (length < 6) return;
+    cur_itch_ns = cur_base_ns + le32(m + 2);
+    if (list_mode) {
+        if (type == 0x21 && length >= 34) note_symbol(m + 19, 6);
+        else if (type == 0x22 && length >= 26) note_symbol(m + 17, 6);
+        else if (type == 0x2F && length >= 40) note_symbol(m + 19, 8);
+        return;
+    }
+    switch (type) {
+    case 0x21: case 0x22: case 0x2F: {  /* Add Order: long (34), short (26), expanded (40) */
+        int symbol_length = type == 0x2F ? 8 : 6, need = type == 0x21 ? 34 : type == 0x22 ? 26 : 40;
+        if (length < need) return;
+        int sym = lookup_symbol(m + (type == 0x22 ? 17 : 19), symbol_length);
+        if (sym < 0) return;
+        uint8_t side = m[14];
+        if (type == 0x22) add_order(m, sym, side, price_short(le16(m + 23)), le16(m + 15));
+        else add_order(m, sym, side, price_long(le64(m + 19 + symbol_length)), le32(m + 15));
+        break;
+    }
+    case 0x23: {  /* Order Executed: at the order's price */
+        if (length < 26) return;
+        Order *order = order_find(le64(m + 6));
+        if (!order) return;
+        uint32_t shares = le32(m + 14);
+        emit_event('E', order->sym, order->ref, 0, order->side, order->px, shares);
+        emit('T', order->sym, order->px, shares);
+        reduce_order(order, shares);
+        break;
+    }
+    case 0x24: {  /* Order Executed at Price/Size */
+        if (length < 38) return;
+        Order *order = order_find(le64(m + 6));
+        if (!order) return;
+        uint32_t shares = le32(m + 14), px = price_long(le64(m + 30));
+        emit_event('C', order->sym, order->ref, 0, order->side, px, shares);
+        emit('T', order->sym, px, shares);
+        reduce_order(order, shares);
+        break;
+    }
+    case 0x25: case 0x26: {  /* Reduce Size: long (18), short (16) */
+        if (length < (type == 0x25 ? 18 : 16)) return;
+        Order *order = order_find(le64(m + 6));
+        if (!order) return;
+        uint32_t shares = type == 0x25 ? le32(m + 14) : le16(m + 14);
+        emit_event('X', order->sym, order->ref, 0, order->side, order->px, shares > order->shares ? order->shares : shares);
+        reduce_order(order, shares);
+        break;
+    }
+    case 0x27: case 0x28: {  /* Modify Order: long (27), short (19); the order keeps its id and loses its place */
+        if (length < (type == 0x27 ? 27 : 19)) return;
+        Order *order = order_find(le64(m + 6));
+        if (!order) return;
+        uint16_t sym = order->sym; uint8_t side = order->side; uint64_t ref = order->ref;
+        uint32_t shares = type == 0x27 ? le32(m + 14) : le16(m + 14);
+        uint32_t px = type == 0x27 ? price_long(le64(m + 18)) : price_short(le16(m + 16));
+        emit_event('U', sym, ref, ref, side, px, shares);
+        side_sub(book_side(&books[sym], side), order->px, order->shares, side_ascending(side));
+        order_erase(order);
+        order_insert(ref, sym, side, px, shares);
+        side_add(book_side(&books[sym], side), px, shares, side_ascending(side));
+        check_quote(sym);
+        break;
+    }
+    case 0x29: {  /* Delete Order */
+        if (length < 14) return;
+        Order *order = order_find(le64(m + 6));
+        if (!order) return;
+        emit_event('D', order->sym, order->ref, 0, order->side, order->px, order->shares);
+        reduce_order(order, order->shares);
+        break;
+    }
+    case 0x2A: case 0x2B: case 0x30: {  /* Trade (non-displayed): long (41), short (33), expanded (43) */
+        int symbol_length = type == 0x30 ? 8 : 6, need = type == 0x2A ? 41 : type == 0x2B ? 33 : 43;
+        if (length < need) return;
+        int sym = lookup_symbol(m + (type == 0x2B ? 17 : 19), symbol_length);
+        if (sym < 0) return;
+        if (type == 0x2B) pitch_trade(sym, m[14], price_short(le16(m + 23)), le16(m + 15));
+        else pitch_trade(sym, m[14], price_long(le64(m + 19 + symbol_length)), le32(m + 15));
+        break;
+    }
+    default: break;
+    }
+}
+
 int main(int argc, char **argv) {
     const char *symbols_arg = NULL, *symbols_file = NULL, *out_path = NULL, *stats_path = NULL;
     int port = 0;
@@ -336,6 +510,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--table-bits") && i + 1 < argc) table_bits = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--depth") && i + 1 < argc) depth = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--events")) events_mode = 1;
+        else if (!strcmp(argv[i], "--protocol") && i + 1 < argc) {
+            const char *name = argv[++i];
+            if (!strcmp(name, "pitch")) pitch = 1;
+            else if (strcmp(name, "itch")) { fprintf(stderr, "--protocol must be itch or pitch\n"); return 1; }
+        }
         else { fprintf(stderr, "bad argument %s\n", argv[i]); return 1; }
     }
     if (depth < 0 || depth > MAX_DEPTH) { fprintf(stderr, "--depth must be between 0 and %d\n", MAX_DEPTH); return 1; }
@@ -361,6 +540,7 @@ int main(int argc, char **argv) {
         fclose(list);
     }
     for (int i = 0; i < 65536; i++) locate_to_symbol[i] = -1;
+    if (pitch) index_symbols();
     table_capacity = 1ULL << table_bits; table_mask = table_capacity - 1;
     table = calloc(table_capacity, sizeof(Order));
     out = list_mode ? stdout : strcmp(out_path, "-") ? fopen(out_path, "wb") : stdout;
@@ -378,6 +558,8 @@ int main(int argc, char **argv) {
     uint64_t packets = 0, udp_packets = 0, messages = 0, gaps = 0, duplicate_packets = 0, expected = 0;
     int have_expected = 0, stopping = 0;
     uint8_t packet_header[16];
+    uint32_t unit_expected[256] = {0};  /* PITCH: next sequence number of each unit */
+    uint8_t unit_started[256] = {0};
     while (!stopping && fread(packet_header, 1, 16, stdin) == 16) {
         uint32_t fields[4]; memcpy(fields, packet_header, 16);
         if (swapped) for (int i = 0; i < 4; i++) fields[i] = __builtin_bswap32(fields[i]);
@@ -399,6 +581,27 @@ int main(int argc, char **argv) {
         udp_packets++;
         const uint8_t *payload = udp + 8;
         int payload_length = (int)(length - (size_t)(payload - buffer));
+        if (pitch) {  /* Sequenced Unit Header: length u16, count u8, unit u8, sequence u32, little-endian; then count messages, each led by its length byte */
+            if (payload_length < 8) continue;
+            int unit_length = le16(payload) < payload_length ? le16(payload) : payload_length;
+            uint32_t unit_count = payload[2], unit_seq = le32(payload + 4);
+            uint8_t unit = payload[3];
+            if (unit_count == 0) continue;  /* heartbeat */
+            if (!unit_started[unit]) { unit_expected[unit] = unit_seq; unit_started[unit] = 1; }
+            if ((int32_t)(unit_seq + unit_count - unit_expected[unit]) <= 0) { duplicate_packets++; continue; }
+            uint32_t unit_skip = (int32_t)(unit_expected[unit] - unit_seq) > 0 ? unit_expected[unit] - unit_seq : 0;
+            if ((int32_t)(unit_seq - unit_expected[unit]) > 0) gaps += unit_seq - unit_expected[unit];
+            unit_expected[unit] = unit_seq + unit_count;
+            const uint8_t *q = payload + 8, *unit_end = payload + unit_length;
+            for (uint32_t i = 0; i < unit_count && q < unit_end; i++) {
+                int message_length = q[0];
+                if (message_length < 2 || q + message_length > unit_end) break;
+                if (i >= unit_skip) { cur_seq = (uint64_t)unit << 32 | (uint32_t)(unit_seq + i); handle_pitch_message(q, message_length); messages++; }
+                if (stop_requested || (stop_at_ns && cur_itch_ns > stop_at_ns)) { stopping = 1; break; }
+                q += message_length;
+            }
+            continue;
+        }
         if (payload_length < 20) continue;
         uint64_t seq = be64(payload + 10);
         uint32_t count = be16(payload + 18);
@@ -420,6 +623,7 @@ int main(int argc, char **argv) {
         if ((packets & 0xFFFFF) == 0)
             fprintf(stderr, "progress: %lluM messages, %llu rows, itch time %.0fs\n", (unsigned long long)(messages >> 20), (unsigned long long)rows_written, cur_itch_ns / 1e9);
     }
+    if (pitch && list_mode) print_listed_symbols();
     fflush(out);
     if (out != stdout) fclose(out);
     if (stats_path) {
