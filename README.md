@@ -30,6 +30,37 @@ Level 1 is the best price; a level that does not exist is `NaN` / 0. A `Q` row i
 `U` replace (`ref` the old order, `new_ref` the new one, `price` and `shares` the new ones), `P` non-displayed trade, `Q` cross. `ref` is 0 for `P` and `Q`; `side` is `B` or `S`.
 Replaying the stream rebuilds the full book at any depth and lets you model queue position. Orders are tracked from the start of the pcap, so a pcap that starts mid-session misses the orders placed before it.
 
+## Feeds (one directory per venue feed)
+
+A host usually holds several pcap files per day, one per venue feed (`edga.pcap.xz`, `edgx.pcap.xz`, `nasdaq_tv.pcap.xz`, `iex_deep.pcap.xz`, ...). Declare each as a `[feeds.NAME]` table and every feed gets its own
+directory in the mount and in the cache, with the same tree as above under it:
+
+```
+/nasdaq_tv/tick/AAPL/2026-11-24.parquet
+/cboe_edga/orderbook/SPY/2026-11-24.csv
+/iex_deep/stream/SPY/2026-11-24.parquet
+```
+
+```toml
+[remote]                          # defaults for every feed
+ssh_host = "user@pcap-host"
+pcap_path = "/data/pcaps/{yyyy}/{mm}/{dd}/{feed}.pcap.xz"   # {feed} is the table name
+[parser]                          # default parser, used by a feed that does not set its own
+command = "parsers/parse_nasdaq_itch.sh"
+
+[feeds.nasdaq_tv]                 # nothing to set: /data/pcaps/2026/11/24/nasdaq_tv.pcap.xz, the default parser
+[feeds.cboe_edga]                 # a feed can override pcap_path, ssh_host, ssh_options and the parser
+pcap_path = "/data/cboe/{yyyy}-{mm}-{dd}/edga.pcap.xz"
+[feeds.cboe_edga.parser]
+command = "parsers/parse_cboe_pitch.sh"
+env = { DFS_PORT = "30101" }      # merged over [parser] env
+```
+
+Names are lowercase letters, digits, `_` and `-`. Without any `[feeds.*]` table nothing changes: one anonymous feed, `/tick`, `/orderbook`, `/stream` at the root. The CLI takes `--feed NAME`
+(`days`, `symbols`, `prefetch`; `datafeedfs-go feeds CONFIG` lists them), the cache is `<cache>/<feed>/<kind>/...`, the console and `/.status` name the feed of every pass, and telemetry gets a `feed` attribute.
+The `cache` size cap, `max_parallel` and the batch window are shared by all feeds. The bundled parser decodes Nasdaq ITCH only: feeds in other protocols (CBOE PITCH, NYSE, IEX DEEP, ...) need a parser script
+that follows the contract below; it is told which feed it is running for in `DFS_FEED`, so one script can serve several.
+
 ## Layout
 
 ```
@@ -248,6 +279,7 @@ Traces: a span `pass` per extraction pass (`kind`, `day`, `symbols.requested`, `
 
 | variable | meaning |
 |---|---|
+| `DFS_FEED` | the `[feeds.NAME]` being read (empty without feeds) |
 | `DFS_MODE` | `list` (print the day's symbols, one per line) or `extract` |
 | `DFS_DATE` | trading day `YYYY-MM-DD` |
 | `DFS_PCAP_NAME` | file name on the host, to pick the decompressor |

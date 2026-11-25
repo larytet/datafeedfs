@@ -412,6 +412,7 @@ var CF=null,ST=null,MT=null,TOKEN='';
 try{TOKEN=sessionStorage.getItem('dfs-token')||''}catch(e){}
 
 function toast(msg){var t=$('toast');t.textContent=msg;t.hidden=false;clearTimeout(toast.h);toast.h=setTimeout(function(){t.hidden=true},3600)}
+function fk(p){return p.feed?p.feed+' '+p.kind:p.kind}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 function pad(n){return n<10?'0'+n:''+n}
 function clock(ms){if(!ms)return '–';var d=new Date(ms);return pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds())}
@@ -631,7 +632,7 @@ function drawCharts(){
     var passes=MT.passes.slice().reverse(),max=passes.reduce(function(m,p){return Math.max(m,p.seconds)},0),minutes=max>=120,unit=minutes?'min':'s';
     bars($('c-dur'),passes.map(function(p){return minutes?p.seconds/60:p.seconds}),passes.map(function(p){return p.status==='failed'?'f6':'f'+({tick:1,orderbook:2,stream:3}[p.kind]||5)}),passes.map(function(p){return p.day.slice(5)}),unit);
     var sorted=MT.passes.map(function(p){return p.seconds}).sort(function(x,y){return x-y});$('now-dur').textContent=sorted.length?'median '+dur(sorted[Math.floor(sorted.length/2)]):'';
-    $('done').innerHTML=MT.passes.length?MT.passes.map(function(p){return '<tr><td class="mono">'+esc(p.kind+' '+p.day)+'</td><td class="num">'+p.symbols+'</td><td class="num">'+dur(p.seconds)+'</td><td><span class="pill '+(p.status==='ok'?'good':'bad')+'">'+esc(p.status)+'</span></td><td>'+clock(p.finished_ms)+'</td></tr>'}).join(''):'<tr><td colspan="5" class="empty">No pass has finished since the start.</td></tr>';
+    $('done').innerHTML=MT.passes.length?MT.passes.map(function(p){return '<tr><td class="mono">'+esc(fk(p)+' '+p.day)+'</td><td class="num">'+p.symbols+'</td><td class="num">'+dur(p.seconds)+'</td><td><span class="pill '+(p.status==='ok'?'good':'bad')+'">'+esc(p.status)+'</span></td><td>'+clock(p.finished_ms)+'</td></tr>'}).join(''):'<tr><td colspan="5" class="empty">No pass has finished since the start.</td></tr>';
     $('upd-p').textContent=when;
   }else{
     var cpu=GROUPS.map(function(g){return MT.cpu[g]||[]}),cores=MT.host.cpus||1;
@@ -680,14 +681,14 @@ function renderStatus(){
   if(c.disk&&c.disk.total)rows.push(['Disk',gib(c.disk.free)+' free of '+gib(c.disk.total)]);
   $('details').innerHTML=rows.map(function(r){return '<dt>'+esc(r[0])+'</dt><dd>'+esc(r[1])+'</dd>'}).join('');
   // passes
-  var now=Date.now(),body=p.running.map(function(r){return '<tr><td class="mono">'+esc(r.kind+' '+r.day)+'</td><td class="num">'+r.symbols+'</td><td class="num">'+dur((now-r.started_ms)/1000)+'</td><td>'+clock(r.started_ms)+'</td></tr>'}).join('');
+  var now=Date.now(),body=p.running.map(function(r){return '<tr><td class="mono">'+esc(fk(r)+' '+r.day)+'</td><td class="num">'+r.symbols+'</td><td class="num">'+dur((now-r.started_ms)/1000)+'</td><td>'+clock(r.started_ms)+'</td></tr>'}).join('');
   if(!p.running.length)body='<tr><td colspan="4" class="empty">No pass is running. Reading a file that is not cached starts one.</td></tr>';
-  if(p.pending.length)body+='<tr><td colspan="4" class="empty" style="white-space:normal">Waiting for a slot or the batch window: '+p.pending.map(function(x){return esc(x.kind+' '+x.day)+' ('+x.symbols+')'}).join(', ')+'</td></tr>';
+  if(p.pending.length)body+='<tr><td colspan="4" class="empty" style="white-space:normal">Waiting for a slot or the batch window: '+p.pending.map(function(x){return esc(fk(x)+' '+x.day)+' ('+x.symbols+')'}).join(', ')+'</td></tr>';
   $('passes').innerHTML=body;
   $('fails').innerHTML=p.failed.length?p.failed.map(function(f){return '<div style="margin:6px 0"><span class="pill bad">failed</span> <span class="mono">'+esc(f.key)+'</span> <span style="color:var(--muted)">'+esc(f.message)+'</span></div>'}).join('')+'<p class="mockbar" style="margin:10px 0 0">A failed pass is retried the next time one of its files is opened.</p>':'<div class="empty">No failures since the start.</div>';
   // slots on the load tab
   var rowsS='';
-  for(var i=0;i<Math.min(p.slots,16);i++){var r=p.running[i];rowsS+=r?'<div style="display:grid;grid-template-columns:170px minmax(0,1fr) 84px;gap:12px;align-items:center;margin:8px 0"><span class="mono" style="font-size:12.5px">'+esc(r.kind+' '+r.day)+'</span><div class="bar good"><span style="width:100%"></span></div><span class="mono" style="text-align:right">'+dur((now-r.started_ms)/1000)+'</span></div>':'<div style="display:grid;grid-template-columns:170px minmax(0,1fr) 84px;gap:12px;align-items:center;margin:8px 0;color:var(--muted)"><span class="mono" style="font-size:12.5px">idle slot</span><div class="bar"></div><span class="mono" style="text-align:right">–</span></div>'}
+  for(var i=0;i<Math.min(p.slots,16);i++){var r=p.running[i];rowsS+=r?'<div style="display:grid;grid-template-columns:170px minmax(0,1fr) 84px;gap:12px;align-items:center;margin:8px 0"><span class="mono" style="font-size:12.5px">'+esc(fk(r)+' '+r.day)+'</span><div class="bar good"><span style="width:100%"></span></div><span class="mono" style="text-align:right">'+dur((now-r.started_ms)/1000)+'</span></div>':'<div style="display:grid;grid-template-columns:170px minmax(0,1fr) 84px;gap:12px;align-items:center;margin:8px 0;color:var(--muted)"><span class="mono" style="font-size:12.5px">idle slot</span><div class="bar"></div><span class="mono" style="text-align:right">–</span></div>'}
   $('slots').innerHTML=rowsS;$('slotnote').textContent=p.slots+' slot'+(p.slots===1?'':'s')+' from extract.max_parallel. Passes over the same day share one pass.'+(p.slots>16?' Showing the first 16.':'');
   if(CF)renderBar();
 }

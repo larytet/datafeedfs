@@ -16,12 +16,13 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-// Layout:
+// Layout of a configuration without [feeds.*] (one anonymous feed):
 //   /tick/<SYMBOL>/<YYYY-MM-DD>.parquet       tick-to-tick best bid and ask, and trades, for that symbol and day
 //   /orderbook/<SYMBOL>/<YYYY-MM-DD>.parquet  the top orderbook.depth levels per side (config, default 5), a row whenever one changes, and trades
 //   /stream/<SYMBOL>/<YYYY-MM-DD>.parquet     every order message (add, execute, cancel, delete, replace, trade, cross), no book
 //   .../<YYYY-MM-DD>.csv                      the same as CSV
 //   /.status                                  JSON: running and pending extractions, failures
+// With [feeds.NAME] tables every feed has a directory of its own holding the same tree: /<feed>/tick/<SYMBOL>/<day>.parquet and so on.
 // Each kind directory lists the symbols of the newest day.
 // Opening a file that is not cached yet triggers the extraction (Store.Request).
 
@@ -31,9 +32,18 @@ type rootNode struct {
 	started time.Time
 }
 
+// feedNode is /<feed>: the kinds of one feed. Without named feeds the root plays this part itself.
+type feedNode struct {
+	fs.Inode
+	store   *Store
+	feed    string
+	started time.Time
+}
+
 type kindNode struct {
 	fs.Inode
 	store   *Store
+	feed    string
 	kind    string
 	started time.Time
 }
@@ -41,6 +51,7 @@ type kindNode struct {
 type symbolNode struct {
 	fs.Inode
 	store   *Store
+	feed    string
 	kind    string
 	symbol  string
 	started time.Time
@@ -49,6 +60,7 @@ type symbolNode struct {
 type fileNode struct {
 	fs.Inode
 	store     *Store
+	feed      string
 	kind      string
 	symbol    string
 	day       string
@@ -66,6 +78,9 @@ var (
 	_ fs.NodeLookuper  = (*rootNode)(nil)
 	_ fs.NodeReaddirer = (*rootNode)(nil)
 	_ fs.NodeGetattrer = (*rootNode)(nil)
+	_ fs.NodeLookuper  = (*feedNode)(nil)
+	_ fs.NodeReaddirer = (*feedNode)(nil)
+	_ fs.NodeGetattrer = (*feedNode)(nil)
 	_ fs.NodeLookuper  = (*kindNode)(nil)
 	_ fs.NodeReaddirer = (*kindNode)(nil)
 	_ fs.NodeGetattrer = (*kindNode)(nil)
@@ -117,10 +132,46 @@ func (node *rootNode) Getattr(ctx context.Context, handle fs.FileHandle, out *fu
 
 func (node *rootNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	entries := []fuse.DirEntry{{Name: ".status", Mode: syscall.S_IFREG}}
+	if node.store.config.Named() {
+		for _, feed := range node.store.config.Feeds {
+			entries = append(entries, fuse.DirEntry{Name: feed.Name, Mode: syscall.S_IFDIR})
+		}
+	} else {
+		entries = append(entries, kindEntries()...)
+	}
+	return fs.NewListDirStream(entries), 0
+}
+
+func kindEntries() []fuse.DirEntry {
+	entries := make([]fuse.DirEntry, 0, len(kinds))
 	for _, kind := range kinds {
 		entries = append(entries, fuse.DirEntry{Name: kind, Mode: syscall.S_IFDIR})
 	}
-	return fs.NewListDirStream(entries), 0
+	return entries
+}
+
+// lookupKind makes the node of /<feed>/<kind> (or /<kind> without named feeds).
+func lookupKind(ctx context.Context, parent fs.InodeEmbedder, store *Store, feed, name string, started time.Time, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if !validKind(name) {
+		return nil, syscall.ENOENT
+	}
+	directoryAttributes(&out.Attr, started)
+	return parent.EmbeddedInode().NewInode(ctx, &kindNode{store: store, feed: feed, kind: name, started: started}, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: stableIno("/" + joinFeed(feed, name, "/"))}), 0
+}
+
+func (node *feedNode) Getattr(ctx context.Context, handle fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	directoryAttributes(&out.Attr, node.started)
+	out.SetTimeout(0)
+	return 0
+}
+
+func (node *feedNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	return fs.NewListDirStream(kindEntries()), 0
+}
+
+func (node *feedNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	noCache(out)
+	return lookupKind(ctx, node, node.store, node.feed, name, node.started, out)
 }
 
 func (node *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -129,11 +180,14 @@ func (node *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 		fileAttributes(&out.Attr, 0, node.started)
 		return node.NewInode(ctx, &statusNode{store: node.store, started: node.started}, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno("/.status")}), 0
 	}
-	if !validKind(name) {
-		return nil, syscall.ENOENT
+	if node.store.config.Named() {
+		if node.store.feeds[name] == nil {
+			return nil, syscall.ENOENT
+		}
+		directoryAttributes(&out.Attr, node.started)
+		return node.NewInode(ctx, &feedNode{store: node.store, feed: name, started: node.started}, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: stableIno("/" + name)}), 0
 	}
-	directoryAttributes(&out.Attr, node.started)
-	return node.NewInode(ctx, &kindNode{store: node.store, kind: name, started: node.started}, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: stableIno("/" + name)}), 0
+	return lookupKind(ctx, node, node.store, "", name, node.started, out)
 }
 
 func (node *kindNode) Getattr(ctx context.Context, handle fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -143,7 +197,7 @@ func (node *kindNode) Getattr(ctx context.Context, handle fs.FileHandle, out *fu
 }
 
 func (node *kindNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	symbols, err := node.store.Symbols()
+	symbols, err := node.store.Symbols(node.feed)
 	if err != nil {
 		return nil, syscall.EIO
 	}
@@ -159,7 +213,7 @@ func (node *kindNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 	if !symbolPattern.MatchString(name) {
 		return nil, syscall.ENOENT
 	}
-	known, err := node.store.HasSymbol(name)
+	known, err := node.store.HasSymbol(node.feed, name)
 	if err != nil {
 		return nil, syscall.EIO
 	}
@@ -167,7 +221,7 @@ func (node *kindNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 		return nil, syscall.ENOENT
 	}
 	directoryAttributes(&out.Attr, node.started)
-	return node.NewInode(ctx, &symbolNode{store: node.store, kind: node.kind, symbol: name, started: node.started}, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: stableIno("/" + node.kind + "/" + name)}), 0
+	return node.NewInode(ctx, &symbolNode{store: node.store, feed: node.feed, kind: node.kind, symbol: name, started: node.started}, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: stableIno("/" + joinFeed(node.feed, node.kind, "/") + "/" + name)}), 0
 }
 
 func (node *symbolNode) Getattr(ctx context.Context, handle fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -177,7 +231,7 @@ func (node *symbolNode) Getattr(ctx context.Context, handle fs.FileHandle, out *
 }
 
 func (node *symbolNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	days, err := node.store.Days()
+	days, err := node.store.Days(node.feed)
 	if err != nil {
 		return nil, syscall.EIO
 	}
@@ -200,7 +254,7 @@ func (node *symbolNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 	if extension != "parquet" && extension != "csv" {
 		return nil, syscall.ENOENT
 	}
-	days, err := node.store.Days()
+	days, err := node.store.Days(node.feed)
 	if err != nil {
 		return nil, syscall.EIO
 	}
@@ -211,16 +265,16 @@ func (node *symbolNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 	if !found {
 		return nil, syscall.ENOENT
 	}
-	child := &fileNode{store: node.store, kind: node.kind, symbol: node.symbol, day: day, extension: extension, started: node.started}
+	child := &fileNode{store: node.store, feed: node.feed, kind: node.kind, symbol: node.symbol, day: day, extension: extension, started: node.started}
 	size, modified := child.cachedInfo()
 	fileAttributes(&out.Attr, size, modified)
-	return node.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno("/" + node.kind + "/" + node.symbol + "/" + name)}), 0
+	return node.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno("/" + joinFeed(node.feed, node.kind, "/") + "/" + node.symbol + "/" + name)}), 0
 }
 
 func (node *fileNode) cachedInfo() (int64, time.Time) {
-	path := node.store.ParquetPath(node.kind, node.symbol, node.day)
+	path := node.store.ParquetPath(node.feed, node.kind, node.symbol, node.day)
 	if node.extension == "csv" {
-		path = node.store.CSVPath(node.kind, node.symbol, node.day)
+		path = node.store.CSVPath(node.feed, node.kind, node.symbol, node.day)
 	}
 	if info, err := os.Stat(path); err == nil {
 		return info.Size(), info.ModTime()
@@ -267,7 +321,7 @@ func (node *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, ui
 	}
 	started := time.Now()
 	for attempt := 0; ; attempt++ {
-		future := node.store.Request(node.kind, node.symbol, node.day)
+		future := node.store.Request(node.feed, node.kind, node.symbol, node.day)
 		hit := future.Done()
 		if node.store.config.Extract.OnMiss == "async" && !future.Done() {
 			return nil, 0, syscall.EAGAIN // extraction continues in the background; retry later or watch /.status
@@ -276,12 +330,12 @@ func (node *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, ui
 			return nil, 0, syscall.EIO
 		}
 		if attempt == 0 {
-			node.store.tel.open(node.kind, hit, time.Since(started))
+			node.store.tel.open(node.feed, node.kind, hit, time.Since(started))
 		}
-		path := node.store.ParquetPath(node.kind, node.symbol, node.day)
+		path := node.store.ParquetPath(node.feed, node.kind, node.symbol, node.day)
 		if node.extension == "csv" {
 			var err error
-			if path, err = node.store.EnsureCSV(node.kind, node.symbol, node.day); err != nil {
+			if path, err = node.store.EnsureCSV(node.feed, node.kind, node.symbol, node.day); err != nil {
 				return nil, 0, syscall.EIO
 			}
 		}

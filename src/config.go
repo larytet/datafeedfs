@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
@@ -24,6 +25,16 @@ type ParserConfig struct {
 	Command []string          `toml:"-"`
 	Env     map[string]string `toml:"env"`
 }
+
+// Feed is one pcap source: a venue's feed such as cboe_edga or nasdaq_tv. Each feed has its own pcap files, ssh host and parser and its own
+// directory in the mount and the cache. A configuration without [feeds.*] has one anonymous feed (Name ""), laid out as before: /tick, /orderbook, /stream.
+type Feed struct {
+	Name   string
+	Remote RemoteConfig
+	Parser ParserConfig
+}
+
+var feedNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,39}$`)
 
 type ExtractConfig struct {
 	BatchWindowSeconds float64 `toml:"batch_window_seconds"` // requests for one day inside this window share a pass over the pcap
@@ -79,6 +90,31 @@ type Config struct {
 	Extract        ExtractConfig
 	Orderbook      OrderbookConfig
 	DaysTTLSeconds float64
+	Feeds          []*Feed // sorted by name; one anonymous feed when [feeds.*] is absent
+}
+
+// Feed returns the feed with that name ("" for the anonymous one).
+func (config *Config) Feed(name string) *Feed {
+	for _, feed := range config.Feeds {
+		if feed.Name == name {
+			return feed
+		}
+	}
+	return nil
+}
+
+// Named reports whether the feeds have their own directories (false for the legacy single-feed layout).
+func (config *Config) Named() bool { return len(config.Feeds) != 1 || config.Feeds[0].Name != "" }
+
+// rawFeed is a [feeds.NAME] table. Every field is optional and defaults to the top-level [remote] and [parser].
+type rawFeed struct {
+	SSHHost    *string  `toml:"ssh_host"`
+	PcapPath   string   `toml:"pcap_path"`
+	SSHOptions []string `toml:"ssh_options"`
+	Parser     struct {
+		Command any            `toml:"command"`
+		Env     map[string]any `toml:"env"`
+	} `toml:"parser"`
 }
 
 type rawConfig struct {
@@ -91,11 +127,12 @@ type rawConfig struct {
 		Dir string `toml:"dir"`
 		CacheConfig
 	} `toml:"cache"`
-	Extract        ExtractConfig   `toml:"extract"`
-	Orderbook      OrderbookConfig `toml:"orderbook"`
-	Telemetry      TelemetryConfig `toml:"telemetry"`
-	UI             UIConfig        `toml:"ui"`
-	DaysTTLSeconds *float64        `toml:"days_ttl_seconds"`
+	Feeds          map[string]rawFeed `toml:"feeds"`
+	Extract        ExtractConfig      `toml:"extract"`
+	Orderbook      OrderbookConfig    `toml:"orderbook"`
+	Telemetry      TelemetryConfig    `toml:"telemetry"`
+	UI             UIConfig           `toml:"ui"`
+	DaysTTLSeconds *float64           `toml:"days_ttl_seconds"`
 }
 
 func expandHome(path string) string {
@@ -123,36 +160,72 @@ func ParseConfig(data []byte, path string) (*Config, error) {
 	if err := toml.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	if raw.Remote.PcapPath == "" {
-		return nil, fmt.Errorf("%s: remote.pcap_path is required", path)
+	defaultCommand, err := parseCommand(raw.Parser.Command, path)
+	if err != nil {
+		return nil, err
 	}
-	var command []string
-	switch value := raw.Parser.Command.(type) {
-	case string:
-		command = strings.Fields(value)
-	case []any:
-		for _, item := range value {
-			command = append(command, fmt.Sprint(item))
+	defaultEnv := stringEnv(raw.Parser.Env)
+	if raw.Remote.SSHOptions == nil {
+		raw.Remote.SSHOptions = []string{"-o", "BatchMode=yes", "-o", "ServerAliveInterval=30"}
+	}
+	var feeds []*Feed
+	if len(raw.Feeds) == 0 {
+		if raw.Remote.PcapPath == "" {
+			return nil, fmt.Errorf("%s: remote.pcap_path is required", path)
+		}
+		if len(defaultCommand) == 0 {
+			return nil, fmt.Errorf("%s: parser.command is required", path)
+		}
+		feeds = []*Feed{{Remote: raw.Remote, Parser: ParserConfig{Command: defaultCommand, Env: defaultEnv}}}
+	}
+	for name, entry := range raw.Feeds {
+		if !feedNamePattern.MatchString(name) || validKind(name) || strings.HasPrefix(name, "orderbook") {
+			return nil, fmt.Errorf("%s: feeds.%s: the name must be lowercase letters, digits, _ or - (at most 40) and not a kind name", path, name)
+		}
+		feed := &Feed{Name: name, Remote: raw.Remote, Parser: ParserConfig{Command: defaultCommand, Env: map[string]string{}}}
+		for key, value := range defaultEnv {
+			feed.Parser.Env[key] = value
+		}
+		if entry.PcapPath != "" {
+			feed.Remote.PcapPath = entry.PcapPath
+		}
+		if entry.SSHHost != nil {
+			feed.Remote.SSHHost = *entry.SSHHost
+		}
+		if entry.SSHOptions != nil {
+			feed.Remote.SSHOptions = entry.SSHOptions
+		}
+		command, err := parseCommand(entry.Parser.Command, path)
+		if err != nil {
+			return nil, err
+		}
+		if len(command) > 0 {
+			feed.Parser.Command = command
+		}
+		for key, value := range stringEnv(entry.Parser.Env) {
+			feed.Parser.Env[key] = value
+		}
+		if feed.Remote.PcapPath == "" {
+			return nil, fmt.Errorf("%s: feeds.%s: pcap_path is required (here or in [remote])", path, name)
+		}
+		if len(feed.Parser.Command) == 0 {
+			return nil, fmt.Errorf("%s: feeds.%s: parser.command is required (here or in [parser])", path, name)
+		}
+		feeds = append(feeds, feed)
+	}
+	sort.Slice(feeds, func(i, j int) bool { return feeds[i].Name < feeds[j].Name })
+	for _, feed := range feeds {
+		if !filepath.IsAbs(feed.Parser.Command[0]) {
+			candidate := filepath.Join(filepath.Dir(path), expandHome(feed.Parser.Command[0]))
+			if _, err := os.Stat(candidate); err == nil {
+				feed.Parser.Command = append([]string{candidate}, feed.Parser.Command[1:]...)
+			}
 		}
 	}
-	if len(command) == 0 {
-		return nil, fmt.Errorf("%s: parser.command is required", path)
-	}
-	if !filepath.IsAbs(command[0]) {
-		candidate := filepath.Join(filepath.Dir(path), expandHome(command[0]))
-		if _, err := os.Stat(candidate); err == nil {
-			command[0] = candidate
-		}
-	}
-	config := &Config{Path: path, Raw: data, Telemetry: raw.Telemetry, UI: raw.UI, Remote: raw.Remote, CacheDir: expandHome(raw.Cache.Dir), Extract: raw.Extract, Orderbook: raw.Orderbook, DaysTTLSeconds: 600}
+	config := &Config{Path: path, Raw: data, Telemetry: raw.Telemetry, UI: raw.UI, Remote: raw.Remote, CacheDir: expandHome(raw.Cache.Dir), Extract: raw.Extract, Orderbook: raw.Orderbook, DaysTTLSeconds: 600, Feeds: feeds}
 	config.Cache = raw.Cache.CacheConfig
-	config.Parser = ParserConfig{Command: command, Env: map[string]string{}}
-	for key, value := range raw.Parser.Env {
-		config.Parser.Env[key] = fmt.Sprint(value)
-	}
-	if config.Remote.SSHOptions == nil {
-		config.Remote.SSHOptions = []string{"-o", "BatchMode=yes", "-o", "ServerAliveInterval=30"}
-	}
+	config.Parser = ParserConfig{Command: defaultCommand, Env: defaultEnv}
+	config.Remote = raw.Remote
 	if config.CacheDir == "" {
 		config.CacheDir = expandHome("~/.cache/datafeedfs")
 	}
@@ -189,17 +262,47 @@ func ParseConfig(data []byte, path string) (*Config, error) {
 	return config, nil
 }
 
-func (config *Config) PcapFor(day string) string {
+func parseCommand(value any, path string) ([]string, error) {
+	var command []string
+	switch value := value.(type) {
+	case string:
+		command = strings.Fields(value)
+	case []any:
+		for _, item := range value {
+			command = append(command, fmt.Sprint(item))
+		}
+	case nil:
+	default:
+		return nil, fmt.Errorf("%s: parser.command must be a string or a list", path)
+	}
+	return command, nil
+}
+
+func stringEnv(raw map[string]any) map[string]string {
+	env := map[string]string{}
+	for key, value := range raw {
+		env[key] = fmt.Sprint(value)
+	}
+	return env
+}
+
+// pattern is the pcap path with {feed} filled in; {yyyy} {mm} {dd} stay.
+func (feed *Feed) pattern() string {
+	return strings.ReplaceAll(feed.Remote.PcapPath, "{feed}", feed.Name)
+}
+
+// PcapFor is the pcap path of one day.
+func (feed *Feed) PcapFor(day string) string {
 	parts := strings.Split(day, "-")
-	return strings.NewReplacer("{yyyy}", parts[0], "{mm}", parts[1], "{dd}", parts[2]).Replace(config.Remote.PcapPath)
+	return strings.NewReplacer("{yyyy}", parts[0], "{mm}", parts[1], "{dd}", parts[2]).Replace(feed.pattern())
 }
 
-func (config *Config) DayGlob() string {
-	return strings.NewReplacer("{yyyy}", "[0-9][0-9][0-9][0-9]", "{mm}", "[0-9][0-9]", "{dd}", "[0-9][0-9]").Replace(config.Remote.PcapPath)
+func (feed *Feed) DayGlob() string {
+	return strings.NewReplacer("{yyyy}", "[0-9][0-9][0-9][0-9]", "{mm}", "[0-9][0-9]", "{dd}", "[0-9][0-9]").Replace(feed.pattern())
 }
 
-func (config *Config) DayRegex() *regexp.Regexp {
-	pattern := regexp.QuoteMeta(config.Remote.PcapPath)
+func (feed *Feed) DayRegex() *regexp.Regexp {
+	pattern := regexp.QuoteMeta(feed.pattern())
 	for name, digits := range map[string]int{"yyyy": 4, "mm": 2, "dd": 2} {
 		pattern = strings.Replace(pattern, regexp.QuoteMeta("{"+name+"}"), fmt.Sprintf("(?P<%s>[0-9]{%d})", name, digits), 1)
 	}

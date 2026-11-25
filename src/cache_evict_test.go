@@ -24,7 +24,7 @@ func evictTestStore(t *testing.T, maxGB float64) *Store {
 
 func writeCached(t *testing.T, store *Store, symbol, day string, size int, age time.Duration) string {
 	t.Helper()
-	path := store.ParquetPath(kindTick, symbol, day)
+	path := store.ParquetPath("", kindTick, symbol, day)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}

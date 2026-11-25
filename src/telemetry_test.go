@@ -83,13 +83,13 @@ func TestInstrumentsAndPassSpans(t *testing.T) {
 	store.tel = newTelemetryFrom(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)), sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
 	store.tel.observe(store)
 
-	hit := store.ParquetPath(kindTick, "AAA", "2024-01-01")
+	hit := store.ParquetPath("", kindTick, "AAA", "2024-01-01")
 	os.MkdirAll(filepath.Dir(hit), 0o755)
 	os.WriteFile(hit, []byte("x"), 0o644)
-	if _, err := store.Request(kindTick, "AAA", "2024-01-01").Wait(); err != nil {
+	if _, err := store.Request("", kindTick, "AAA", "2024-01-01").Wait(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Request(kindTick, "AAA", "2024-01-02").Wait(); err == nil {
+	if _, err := store.Request("", kindTick, "AAA", "2024-01-02").Wait(); err == nil {
 		t.Fatal("the pass over a missing pcap should fail")
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -146,7 +146,7 @@ func TestEvictionIsCounted(t *testing.T) {
 	store.config.Cache.MaxGB, store.config.Cache.EvictTo, store.config.Cache.MinAgeSeconds = 1e-3, 0.5, 1
 	store.evictPause = 0
 	for i, symbol := range []string{"AAA", "BBB", "CCC"} {
-		path := store.ParquetPath(kindTick, symbol, "2024-01-02")
+		path := store.ParquetPath("", kindTick, symbol, "2024-01-02")
 		os.MkdirAll(filepath.Dir(path), 0o755)
 		os.WriteFile(path, make([]byte, 600_000), 0o644)
 		old := time.Now().Add(-time.Duration(10+i) * time.Hour)
@@ -185,7 +185,7 @@ func TestOTLPExport(t *testing.T) {
 	defer collector.Close()
 
 	store, _ := newTestStore(t, fmt.Sprintf("[telemetry]\nenabled = true\nendpoint = %q\nservice_name = \"datafeedfs-test\"\nmetrics_interval_seconds = 0.2\n", collector.URL))
-	if _, err := store.Request(kindOrderbook, "AAA", "2024-01-02").Wait(); err == nil {
+	if _, err := store.Request("", kindOrderbook, "AAA", "2024-01-02").Wait(); err == nil {
 		t.Fatal("the pass should fail")
 	}
 	store.tel.Shutdown(10 * time.Second)
@@ -248,7 +248,7 @@ func TestTelemetryOffIsInert(t *testing.T) {
 	if len(store.tel.shutdown) != 0 {
 		t.Fatal("providers were created with telemetry disabled")
 	}
-	store.Request(kindTick, "AAA", "2024-01-02").Wait() // every call is a no-op and must not panic
+	store.Request("", kindTick, "AAA", "2024-01-02").Wait() // every call is a no-op and must not panic
 	store.tel.Shutdown(time.Second)
 }
 

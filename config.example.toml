@@ -6,6 +6,12 @@ ssh_host = "user@pcap-host.example.com"
 # One pcap per trading day. {yyyy} {mm} {dd} are replaced; the same pattern, with wildcards, is used to discover the days.
 pcap_path = "/data/pcaps/{yyyy}/{mm}/{dd}/nasdaq_itch.pcap.xz"
 
+# Several venue feeds (one pcap per feed and day)? Use {feed} in pcap_path and declare each one; every feed gets its own directory, /<feed>/tick/...
+# [feeds.nasdaq_tv]
+# [feeds.cboe_edga]
+# pcap_path = "/data/pcaps/{yyyy}/{mm}/{dd}/edga.pcap.xz"       # optional per-feed override (also ssh_host, ssh_options, [feeds.NAME.parser])
+# See README, "Feeds".
+
 [parser]
 # Run once per pass with the pcap (as stored) on stdin. See parsers/parse_nasdaq_itch.sh for the contract.
 command = "parsers/parse_nasdaq_itch.sh"

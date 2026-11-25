@@ -84,11 +84,11 @@ func TestUIPageAndInfo(t *testing.T) {
 
 func TestUIStatusAndMetrics(t *testing.T) {
 	u := newUITest(t, "")
-	path := u.store.ParquetPath(kindTick, "AAA", "2024-01-02")
+	path := u.store.ParquetPath("", kindTick, "AAA", "2024-01-02")
 	os.MkdirAll(strings.TrimSuffix(path, "/2024-01-02.parquet"), 0o755)
 	os.WriteFile(path, make([]byte, 1234), 0o644)
 	u.store.scanCache()
-	u.store.Request(kindTick, "AAA", "2024-01-02").Wait()
+	u.store.Request("", kindTick, "AAA", "2024-01-02").Wait()
 
 	status, body := u.call("GET", "/api/status", nil, nil)
 	if status != 200 {

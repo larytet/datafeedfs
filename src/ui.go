@@ -171,13 +171,23 @@ func (ui *uiServer) status(w http.ResponseWriter, r *http.Request) {
 	store := ui.store
 	config := store.config
 	hostname, _ := os.Hostname()
-	source := config.Remote.SSHHost
-	if source == "" {
-		source = "this machine"
+	var sources []string
+	seenSource := map[string]bool{}
+	for _, feed := range config.Feeds {
+		source := feed.Remote.SSHHost
+		if source == "" {
+			source = "this machine"
+		}
+		if !seenSource[source] {
+			seenSource[source] = true
+			sources = append(sources, source)
+		}
 	}
+	source := strings.Join(sources, ", ")
 
 	store.mutex.Lock()
 	type passJSON struct {
+		Feed      string `json:"feed,omitempty"`
 		Kind      string `json:"kind"`
 		Day       string `json:"day"`
 		Symbols   int    `json:"symbols"`
@@ -185,10 +195,10 @@ func (ui *uiServer) status(w http.ResponseWriter, r *http.Request) {
 	}
 	running, pending := []passJSON{}, []passJSON{}
 	for _, info := range store.running {
-		running = append(running, passJSON{info.kind, info.day, info.symbols, info.started.UnixMilli()})
+		running = append(running, passJSON{info.feed, info.kind, info.day, info.symbols, info.started.UnixMilli()})
 	}
 	for pass, symbols := range store.pending {
-		pending = append(pending, passJSON{Kind: pass.kind, Day: pass.day, Symbols: len(symbols)})
+		pending = append(pending, passJSON{Feed: pass.feed, Kind: pass.kind, Day: pass.day, Symbols: len(symbols)})
 	}
 	failed := []map[string]string{}
 	for key, message := range store.failures {
@@ -196,7 +206,9 @@ func (ui *uiServer) status(w http.ResponseWriter, r *http.Request) {
 	}
 	store.mutex.Unlock()
 	sort.Slice(running, func(i, j int) bool { return running[i].StartedMS < running[j].StartedMS })
-	sort.Slice(pending, func(i, j int) bool { return pending[i].Kind+pending[i].Day < pending[j].Kind+pending[j].Day })
+	sort.Slice(pending, func(i, j int) bool {
+		return pending[i].Feed+pending[i].Kind+pending[i].Day < pending[j].Feed+pending[j].Kind+pending[j].Day
+	})
 	sort.Slice(failed, func(i, j int) bool { return failed[i]["key"] < failed[j]["key"] })
 
 	cache := map[string]any{
@@ -216,15 +228,37 @@ func (ui *uiServer) status(w http.ResponseWriter, r *http.Request) {
 		cache["disk"] = map[string]any{"total": host.DiskTotal, "free": host.DiskFree}
 	}
 
+	// the listing spans the feeds: the longest day list, the widest day range, the most symbols
+	days, symbols, firstDay, lastDay := 0, 0, "", ""
+	feedListing := []map[string]any{}
+	for _, feed := range config.Feeds {
+		state := store.feeds[feed.Name]
+		state.lookupMutex.Lock()
+		entry := map[string]any{"feed": feed.Name, "pcap_path": feed.pattern(), "days": len(state.days), "symbols": len(state.symbols)}
+		if len(state.days) > 0 {
+			first, last := state.days[0], state.days[len(state.days)-1]
+			entry["first_day"], entry["last_day"] = first, last
+			if firstDay == "" || first < firstDay {
+				firstDay = first
+			}
+			if last > lastDay {
+				lastDay = last
+			}
+		}
+		days, symbols = max(days, len(state.days)), max(symbols, len(state.symbols))
+		state.lookupMutex.Unlock()
+		feedListing = append(feedListing, entry)
+	}
 	listing := map[string]any{"days": nil, "first_day": "", "last_day": "", "symbols": nil}
-	store.lookupMutex.Lock()
-	if len(store.days) > 0 {
-		listing["days"], listing["first_day"], listing["last_day"] = len(store.days), store.days[0], store.days[len(store.days)-1]
+	if days > 0 {
+		listing["days"], listing["first_day"], listing["last_day"] = days, firstDay, lastDay
 	}
-	if len(store.symbols) > 0 {
-		listing["symbols"] = len(store.symbols)
+	if symbols > 0 {
+		listing["symbols"] = symbols
 	}
-	store.lookupMutex.Unlock()
+	if config.Named() {
+		listing["feeds"] = feedListing
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"mount": map[string]any{
@@ -318,7 +352,7 @@ func (ui *uiServer) metrics(w http.ResponseWriter, r *http.Request) {
 	passes := []map[string]any{}
 	for i := len(history) - 1; i >= 0 && len(passes) < 12; i-- {
 		record := history[i]
-		passes = append(passes, map[string]any{"kind": record.Kind, "day": record.Day, "symbols": record.Symbols, "seconds": record.Seconds, "status": record.Status, "finished_ms": record.Finished.UnixMilli()})
+		passes = append(passes, map[string]any{"feed": record.Feed, "kind": record.Kind, "day": record.Day, "symbols": record.Symbols, "seconds": record.Seconds, "status": record.Status, "finished_ms": record.Finished.UnixMilli()})
 	}
 	response["passes"] = passes
 	top := []map[string]any{}

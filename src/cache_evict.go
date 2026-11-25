@@ -64,7 +64,6 @@ func (store *Store) scanCache() ([]cacheFile, int64) {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), "_") {
 			continue
 		}
-		entryName := entry.Name()
 		filepath.WalkDir(filepath.Join(store.cache, entry.Name()), func(path string, entry fs.DirEntry, err error) error {
 			if err != nil || entry.IsDir() || !(strings.HasSuffix(path, ".parquet") || strings.HasSuffix(path, ".csv")) {
 				return nil
@@ -75,10 +74,11 @@ func (store *Store) scanCache() ([]cacheFile, int64) {
 			}
 			files = append(files, cacheFile{path, info.Size(), info.ModTime()})
 			total += info.Size()
-			kind := stats.ByKind[entryName]
+			key := store.kindOfPath(path)
+			kind := stats.ByKind[key]
 			kind.Bytes += info.Size()
 			kind.Files++
-			stats.ByKind[entryName] = kind
+			stats.ByKind[key] = kind
 			return nil
 		})
 	}

@@ -153,7 +153,11 @@ func (telemetry *Telemetry) observe(store *Store) {
 		observer.ObserveInt64(limit, int64(store.config.Cache.MaxGB*(1<<30)))
 		if stats := store.cacheStats.Load(); stats != nil {
 			for kind, stat := range stats.ByKind {
-				attributes := metric.WithAttributes(attribute.String("kind", kind))
+				feed, kindName := "", kind
+				if store.config.Named() {
+					feed, kindName, _ = strings.Cut(kind, "/")
+				}
+				attributes := feedAttributes(feed, kindName)
 				observer.ObserveInt64(bytes, stat.Bytes, attributes)
 				observer.ObserveInt64(files, int64(stat.Files), attributes)
 			}
@@ -167,16 +171,25 @@ func (telemetry *Telemetry) observe(store *Store) {
 
 func kindAttribute(kind string) attribute.KeyValue { return attribute.String("kind", kind) }
 
-func (telemetry *Telemetry) request(kind, result string) {
-	telemetry.requests.Add(context.Background(), 1, metric.WithAttributes(kindAttribute(kind), attribute.String("result", result)))
+// feedAttributes are the kind attribute of an instrument, plus the feed when feeds are named.
+func feedAttributes(feed, kind string, more ...attribute.KeyValue) metric.MeasurementOption {
+	attributes := []attribute.KeyValue{kindAttribute(kind)}
+	if feed != "" {
+		attributes = append(attributes, attribute.String("feed", feed))
+	}
+	return metric.WithAttributes(append(attributes, more...)...)
 }
 
-func (telemetry *Telemetry) open(kind string, hit bool, waited time.Duration) {
+func (telemetry *Telemetry) request(feed, kind, result string) {
+	telemetry.requests.Add(context.Background(), 1, feedAttributes(feed, kind, attribute.String("result", result)))
+}
+
+func (telemetry *Telemetry) open(feed, kind string, hit bool, waited time.Duration) {
 	result := "miss"
 	if hit {
 		result = "hit"
 	}
-	telemetry.openWait.Record(context.Background(), waited.Seconds(), metric.WithAttributes(kindAttribute(kind), attribute.String("result", result)))
+	telemetry.openWait.Record(context.Background(), waited.Seconds(), feedAttributes(feed, kind, attribute.String("result", result)))
 }
 
 func (telemetry *Telemetry) evicted(files int, bytes int64) {
@@ -185,8 +198,8 @@ func (telemetry *Telemetry) evicted(files int, bytes int64) {
 }
 
 // startPass opens the span of a pass; finish ends it and records the metrics.
-func (telemetry *Telemetry) startPass(kind, day string, requested int) (context.Context, trace.Span) {
-	return telemetry.tracer.Start(context.Background(), "pass", trace.WithAttributes(kindAttribute(kind), attribute.String("day", day), attribute.Int("symbols.requested", requested)))
+func (telemetry *Telemetry) startPass(feed, kind, day string, requested int) (context.Context, trace.Span) {
+	return telemetry.tracer.Start(context.Background(), "pass", trace.WithAttributes(attribute.String("feed", feed), kindAttribute(kind), attribute.String("day", day), attribute.Int("symbols.requested", requested)))
 }
 
 func (telemetry *Telemetry) startPipeline(parent context.Context, extracted int, wholeDay bool) trace.Span {
@@ -194,7 +207,7 @@ func (telemetry *Telemetry) startPipeline(parent context.Context, extracted int,
 	return span
 }
 
-func (telemetry *Telemetry) finishPass(span trace.Span, kind string, requested int, took time.Duration, err error) {
+func (telemetry *Telemetry) finishPass(span trace.Span, feed, kind string, requested int, took time.Duration, err error) {
 	status := "ok"
 	if err != nil {
 		status = "failed"
@@ -203,10 +216,10 @@ func (telemetry *Telemetry) finishPass(span trace.Span, kind string, requested i
 	}
 	span.SetAttributes(attribute.String("status", status))
 	span.End()
-	attributes := metric.WithAttributes(kindAttribute(kind), attribute.String("status", status))
+	attributes := feedAttributes(feed, kind, attribute.String("status", status))
 	telemetry.passDuration.Record(context.Background(), took.Seconds(), attributes)
 	telemetry.passes.Add(context.Background(), 1, attributes)
-	telemetry.passSymbols.Record(context.Background(), int64(requested), metric.WithAttributes(kindAttribute(kind)))
+	telemetry.passSymbols.Record(context.Background(), int64(requested), feedAttributes(feed, kind))
 }
 
 // Shutdown flushes pending metrics and spans.

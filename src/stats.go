@@ -23,6 +23,7 @@ type CacheStats struct {
 }
 
 type passRecord struct {
+	Feed     string
 	Kind     string
 	Day      string
 	Symbols  int
@@ -32,9 +33,9 @@ type passRecord struct {
 }
 
 type runInfo struct {
-	kind, day string
-	symbols   int
-	started   time.Time
+	feed, kind, day string
+	symbols         int
+	started         time.Time
 }
 
 const historyLimit = 100
@@ -53,7 +54,11 @@ func (store *Store) kindOfPath(path string) string {
 	if err != nil {
 		return ""
 	}
-	return strings.SplitN(filepath.ToSlash(relative), "/", 2)[0]
+	parts := 1
+	if store.config.Named() {
+		parts = 2 // <feed>/<kind>
+	}
+	return strings.Join(strings.SplitN(filepath.ToSlash(relative), "/", parts+1)[:parts], "/")
 }
 
 func (store *Store) recordPass(record passRecord) {

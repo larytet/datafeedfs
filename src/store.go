@@ -50,11 +50,29 @@ func (future *Future) Wait() (string, error) {
 }
 
 // passKey identifies one pass over a day's pcap: the files of one kind for that day.
-type passKey struct{ kind, day string }
+type passKey struct{ feed, kind, day string }
 
-func (key passKey) String() string { return key.kind + " " + key.day }
+func (key passKey) String() string { return joinFeed(key.feed, key.kind+" "+key.day, " ") }
 
-type fileKey struct{ kind, day, symbol string }
+// joinFeed prefixes text with the feed name; the anonymous feed adds nothing.
+func joinFeed(feed, text, separator string) string {
+	if feed == "" {
+		return text
+	}
+	return feed + separator + text
+}
+
+type fileKey struct{ feed, kind, day, symbol string }
+
+// feedState is what the store knows about one feed's pcap files: the days found on the host and the symbols of the newest day.
+type feedState struct {
+	*Feed
+	lookupMutex sync.Mutex
+	days        []string
+	daysLoaded  time.Time
+	symbols     []string
+	symbolSet   map[string]bool
+}
 
 // Store owns remote access, extraction scheduling and the on-disk cache:
 // <cache>/<kind>/<SYMBOL>/<YYYY-MM-DD>.parquet (and .csv on demand), <cache>/_symbols/<day>.txt, <cache>/_logs/. The kind directory
@@ -73,12 +91,8 @@ type Store struct {
 	passCounter  int
 	wake         chan struct{}
 
-	lookupMutex sync.Mutex
-	days        []string
-	daysLoaded  time.Time
-	symbols     []string
-	symbolSet   map[string]bool
-	csvMutex    sync.Mutex
+	feeds    map[string]*feedState
+	csvMutex sync.Mutex
 
 	startedAt  time.Time
 	mountpoint string // set by mount; empty when serving the console without a mount
@@ -97,11 +111,15 @@ type Store struct {
 
 func NewStore(config *Config) (*Store, error) {
 	store := &Store{
+		feeds:  map[string]*feedState{},
 		config: config, cache: config.CacheDir,
 		pending: map[passKey]map[string]*Future{}, firstRequest: map[passKey]time.Time{}, inflight: map[fileKey]*Future{},
 		runningDays: map[passKey]bool{}, failures: map[string]string{}, wake: make(chan struct{}, 1),
 		touched: map[string]time.Time{}, evictPause: 2 * time.Second,
 		startedAt: time.Now(), running: map[passKey]*runInfo{}, tel: newTelemetry(config),
+	}
+	for _, feed := range config.Feeds {
+		store.feeds[feed.Name] = &feedState{Feed: feed}
 	}
 	store.tel.observe(store)
 	for _, name := range []string{"_symbols", "_logs", "_work"} {
@@ -109,8 +127,10 @@ func NewStore(config *Config) (*Store, error) {
 			return nil, err
 		}
 	}
-	if err := migrateLegacyCache(store.cache); err != nil {
-		return nil, err
+	if !config.Named() {
+		if err := migrateLegacyCache(store.cache); err != nil {
+			return nil, err
+		}
 	}
 	go store.scheduler()
 	if config.Cache.MaxGB > 0 || config.UI.Listen != "" || config.Telemetry.metricsOn() {
@@ -141,24 +161,36 @@ func migrateLegacyCache(cache string) error {
 
 // ----- remote access ---------------------------------------------------------------------------------------------------------
 
-func (store *Store) remoteCommand(command string) *exec.Cmd {
-	if store.config.Remote.SSHHost == "" {
+// feed returns the state of a feed, or an error naming the configured ones.
+func (store *Store) feed(name string) (*feedState, error) {
+	if state := store.feeds[name]; state != nil {
+		return state, nil
+	}
+	return nil, fmt.Errorf("unknown feed %q", name)
+}
+
+func (feed *feedState) remoteCommand(command string) *exec.Cmd {
+	if feed.Remote.SSHHost == "" {
 		return exec.Command("sh", "-c", command)
 	}
-	arguments := append(append([]string{}, store.config.Remote.SSHOptions...), store.config.Remote.SSHHost, command)
+	arguments := append(append([]string{}, feed.Remote.SSHOptions...), feed.Remote.SSHHost, command)
 	return exec.Command("ssh", arguments...)
 }
 
 // Days returns the trading days that have a pcap on the host, ascending. Cached for days_ttl_seconds.
-func (store *Store) Days() ([]string, error) {
-	store.lookupMutex.Lock()
-	defer store.lookupMutex.Unlock()
-	if len(store.days) > 0 && time.Since(store.daysLoaded).Seconds() < store.config.DaysTTLSeconds {
-		return store.days, nil
+func (store *Store) Days(feedName string) ([]string, error) {
+	feed, err := store.feed(feedName)
+	if err != nil {
+		return nil, err
 	}
-	command := store.remoteCommand("ls -1 " + store.config.DayGlob() + " 2>/dev/null")
+	feed.lookupMutex.Lock()
+	defer feed.lookupMutex.Unlock()
+	if len(feed.days) > 0 && time.Since(feed.daysLoaded).Seconds() < store.config.DaysTTLSeconds {
+		return feed.days, nil
+	}
+	command := feed.remoteCommand("ls -1 " + feed.DayGlob() + " 2>/dev/null")
 	output, _ := command.Output() // ls exits non-zero when a glob matches nothing; an empty result is handled below
-	regex := store.config.DayRegex()
+	regex := feed.DayRegex()
 	found := map[string]bool{}
 	for _, line := range strings.Split(string(output), "\n") {
 		if match := regex.FindStringSubmatch(strings.TrimSpace(line)); match != nil {
@@ -170,51 +202,56 @@ func (store *Store) Days() ([]string, error) {
 		days = append(days, day)
 	}
 	sort.Strings(days)
-	if len(days) > 0 || len(store.days) == 0 {
-		store.days, store.daysLoaded = days, time.Now()
+	if len(days) > 0 || len(feed.days) == 0 {
+		feed.days, feed.daysLoaded = days, time.Now()
 	}
-	return store.days, nil
+	return feed.days, nil
 }
 
 // Symbols returns the symbols of the newest day, computed once by running the parser in list mode.
-func (store *Store) Symbols() ([]string, error) {
-	days, err := store.Days()
-	if err != nil || len(days) == 0 {
-		return nil, err
-	}
-	store.lookupMutex.Lock()
-	if store.symbols != nil {
-		defer store.lookupMutex.Unlock()
-		return store.symbols, nil
-	}
-	store.lookupMutex.Unlock()
-	names, err := store.SymbolsForDay(days[len(days)-1])
+func (store *Store) Symbols(feedName string) ([]string, error) {
+	feed, err := store.feed(feedName)
 	if err != nil {
 		return nil, err
 	}
-	store.lookupMutex.Lock()
-	defer store.lookupMutex.Unlock()
-	store.symbols = names
-	store.symbolSet = make(map[string]bool, len(names))
+	days, err := store.Days(feedName)
+	if err != nil || len(days) == 0 {
+		return nil, err
+	}
+	feed.lookupMutex.Lock()
+	if feed.symbols != nil {
+		defer feed.lookupMutex.Unlock()
+		return feed.symbols, nil
+	}
+	feed.lookupMutex.Unlock()
+	names, err := store.SymbolsForDay(feedName, days[len(days)-1])
+	if err != nil {
+		return nil, err
+	}
+	feed.lookupMutex.Lock()
+	defer feed.lookupMutex.Unlock()
+	feed.symbols = names
+	feed.symbolSet = make(map[string]bool, len(names))
 	for _, name := range names {
-		store.symbolSet[name] = true
+		feed.symbolSet[name] = true
 	}
 	return names, nil
 }
 
-func (store *Store) HasSymbol(symbol string) (bool, error) {
-	if _, err := store.Symbols(); err != nil {
+func (store *Store) HasSymbol(feedName, symbol string) (bool, error) {
+	if _, err := store.Symbols(feedName); err != nil {
 		return false, err
 	}
-	store.lookupMutex.Lock()
-	defer store.lookupMutex.Unlock()
-	return store.symbolSet[symbol], nil
+	feed := store.feeds[feedName]
+	feed.lookupMutex.Lock()
+	defer feed.lookupMutex.Unlock()
+	return feed.symbolSet[symbol], nil
 }
 
-func (store *Store) SymbolsForDay(day string) ([]string, error) {
-	cached := filepath.Join(store.cache, "_symbols", day+".txt")
+func (store *Store) SymbolsForDay(feedName, day string) ([]string, error) {
+	cached := filepath.Join(store.cache, "_symbols", joinFeed(feedName, day, "-")+".txt")
 	if _, err := os.Stat(cached); err != nil {
-		output, err := store.runPipeline(day, "list", nil, true)
+		output, err := store.runPipeline(feedName, day, "list", nil, true)
 		if err != nil {
 			return nil, err
 		}
@@ -247,29 +284,33 @@ func (store *Store) SymbolsForDay(day string) ([]string, error) {
 }
 
 // runPipeline runs "ssh cat <pcap> | parser" and returns the parser's stdout when capture is set.
-func (store *Store) runPipeline(day, mode string, extraEnv map[string]string, capture bool) ([]byte, error) {
-	pcap := store.config.PcapFor(day)
+func (store *Store) runPipeline(feedName, day, mode string, extraEnv map[string]string, capture bool) ([]byte, error) {
+	feed, err := store.feed(feedName)
+	if err != nil {
+		return nil, err
+	}
+	pcap := feed.PcapFor(day)
 	store.mutex.Lock()
 	store.passCounter++
 	counter := store.passCounter
 	store.mutex.Unlock()
-	logPath := filepath.Join(store.cache, "_logs", fmt.Sprintf("%s-%s-%d.log", day, mode, counter))
+	logPath := filepath.Join(store.cache, "_logs", fmt.Sprintf("%s-%s-%d.log", joinFeed(feedName, day, "-"), mode, counter))
 	logFile, err := os.Create(logPath)
 	if err != nil {
 		return nil, err
 	}
 	defer logFile.Close()
 
-	source := store.remoteCommand("cat " + shellQuote(pcap))
+	source := feed.remoteCommand("cat " + shellQuote(pcap))
 	source.Stderr = logFile
-	parser := exec.Command(store.config.Parser.Command[0], store.config.Parser.Command[1:]...)
+	parser := exec.Command(feed.Parser.Command[0], feed.Parser.Command[1:]...)
 	parser.Stderr = logFile
 	executable, _ := os.Executable()
 	environment := append(os.Environ(), "DFS_INGEST="+executable+" ingest")
-	for key, value := range store.config.Parser.Env {
+	for key, value := range feed.Parser.Env {
 		environment = append(environment, key+"="+value)
 	}
-	environment = append(environment, "DFS_MODE="+mode, "DFS_DATE="+day, "DFS_PCAP_NAME="+filepath.Base(pcap))
+	environment = append(environment, "DFS_FEED="+feedName, "DFS_MODE="+mode, "DFS_DATE="+day, "DFS_PCAP_NAME="+filepath.Base(pcap))
 	for key, value := range extraEnv {
 		environment = append(environment, key+"="+value)
 	}
@@ -320,27 +361,27 @@ func shellQuote(text string) string { return "'" + strings.ReplaceAll(text, "'",
 // ----- cache -----------------------------------------------------------------------------------------------------------------
 
 // kindDir is the cache directory of a kind. The depth is part of the orderbook directory: changing orderbook.depth starts a new cache.
-func (store *Store) kindDir(kind string) string {
+func (store *Store) kindDir(feed, kind string) string {
 	if kind == kindOrderbook {
-		return filepath.Join(store.cache, fmt.Sprintf("%s-%d", kindOrderbook, store.config.Orderbook.Depth))
+		kind = fmt.Sprintf("%s-%d", kindOrderbook, store.config.Orderbook.Depth)
 	}
-	return filepath.Join(store.cache, kind)
+	return filepath.Join(store.cache, feed, kind) // the anonymous feed has no directory of its own
 }
 
-func (store *Store) ParquetPath(kind, symbol, day string) string {
-	return filepath.Join(store.kindDir(kind), symbol, day+".parquet")
+func (store *Store) ParquetPath(feed, kind, symbol, day string) string {
+	return filepath.Join(store.kindDir(feed, kind), symbol, day+".parquet")
 }
 
-func (store *Store) CSVPath(kind, symbol, day string) string {
-	return filepath.Join(store.kindDir(kind), symbol, day+".csv")
+func (store *Store) CSVPath(feed, kind, symbol, day string) string {
+	return filepath.Join(store.kindDir(feed, kind), symbol, day+".csv")
 }
 
-func (store *Store) EnsureCSV(kind, symbol, day string) (string, error) {
-	target := store.CSVPath(kind, symbol, day)
+func (store *Store) EnsureCSV(feed, kind, symbol, day string) (string, error) {
+	target := store.CSVPath(feed, kind, symbol, day)
 	store.csvMutex.Lock()
 	defer store.csvMutex.Unlock()
 	if _, err := os.Stat(target); err != nil {
-		if err := WriteCSV(store.ParquetPath(kind, symbol, day), target); err != nil {
+		if err := WriteCSV(store.ParquetPath(feed, kind, symbol, day), target); err != nil {
 			return "", err
 		}
 	} else {
@@ -352,27 +393,27 @@ func (store *Store) EnsureCSV(kind, symbol, day string) (string, error) {
 // ----- extraction ------------------------------------------------------------------------------------------------------------
 
 // Request returns a Future for the cached parquet path of (kind, symbol, day), queueing an extraction when it is not cached.
-func (store *Store) Request(kind, symbol, day string) *Future {
-	path := store.ParquetPath(kind, symbol, day)
-	pass := passKey{kind, day}
+func (store *Store) Request(feed, kind, symbol, day string) *Future {
+	path := store.ParquetPath(feed, kind, symbol, day)
+	pass := passKey{feed, kind, day}
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
-	if future := store.inflight[fileKey{kind, day, symbol}]; future != nil {
+	if future := store.inflight[fileKey{feed, kind, day, symbol}]; future != nil {
 		store.counters.misses.Add(1)
-		store.tel.request(kind, "joined")
+		store.tel.request(feed, kind, "joined")
 		return future
 	}
 	future := newFuture()
 	if _, err := os.Stat(path); err == nil {
 		store.touch(path)
 		store.counters.hits.Add(1)
-		store.tel.request(kind, "hit")
+		store.tel.request(feed, kind, "hit")
 		future.resolve(path, nil)
 		return future
 	}
 	store.counters.misses.Add(1)
-	store.tel.request(kind, "miss")
-	store.inflight[fileKey{kind, day, symbol}] = future
+	store.tel.request(feed, kind, "miss")
+	store.inflight[fileKey{feed, kind, day, symbol}] = future
 	if store.pending[pass] == nil {
 		store.pending[pass] = map[string]*Future{}
 	}
@@ -421,7 +462,7 @@ func (store *Store) scheduler() {
 }
 
 func (store *Store) runBatch(pass passKey, batch map[string]*Future) {
-	kind, day := pass.kind, pass.day
+	feed, kind, day := pass.feed, pass.kind, pass.day
 	started := time.Now()
 	symbols := make([]string, 0, len(batch))
 	for symbol := range batch {
@@ -432,18 +473,18 @@ func (store *Store) runBatch(pass passKey, batch map[string]*Future) {
 	if len(preview) > 8 {
 		preview = preview[:8]
 	}
-	log.Printf("%s pass over %s for %d requested symbols: %s", kind, day, len(symbols), strings.Join(preview, ","))
+	log.Printf("%s pass over %s for %d requested symbols: %s", joinFeed(feed, kind, " "), day, len(symbols), strings.Join(preview, ","))
 	store.mutex.Lock()
 	store.passCounter++
-	work := filepath.Join(store.cache, "_work", fmt.Sprintf("%s-%d-%d", day, os.Getpid(), store.passCounter))
-	store.running[pass] = &runInfo{kind: kind, day: day, symbols: len(symbols), started: started}
+	work := filepath.Join(store.cache, "_work", fmt.Sprintf("%s-%d-%d", joinFeed(feed, day, "-"), os.Getpid(), store.passCounter))
+	store.running[pass] = &runInfo{feed: feed, kind: kind, day: day, symbols: len(symbols), started: started}
 	store.mutex.Unlock()
-	passContext, span := store.tel.startPass(kind, day, len(symbols))
+	passContext, span := store.tel.startPass(feed, kind, day, len(symbols))
 
 	err := func() error {
 		var missing []string // requested symbols that an earlier pass of this day did not already cache
 		for _, symbol := range symbols {
-			if _, err := os.Stat(store.ParquetPath(kind, symbol, day)); err != nil {
+			if _, err := os.Stat(store.ParquetPath(feed, kind, symbol, day)); err != nil {
 				missing = append(missing, symbol)
 			}
 		}
@@ -452,7 +493,7 @@ func (store *Store) runBatch(pass passKey, batch map[string]*Future) {
 		}
 		extract := symbols
 		if store.config.Extract.WholeDay { // the pass costs the same for one symbol or all of them: take them all
-			if all, err := store.SymbolsForDay(day); err == nil && len(all) > 0 {
+			if all, err := store.SymbolsForDay(feed, day); err == nil && len(all) > 0 {
 				extract = all
 			}
 		}
@@ -468,7 +509,7 @@ func (store *Store) runBatch(pass passKey, batch map[string]*Future) {
 			environment["DFS_DEPTH"] = fmt.Sprint(store.config.Orderbook.Depth)
 		}
 		pipeline := store.tel.startPipeline(passContext, len(extract), store.config.Extract.WholeDay)
-		_, pipelineErr := store.runPipeline(day, "extract", environment, false)
+		_, pipelineErr := store.runPipeline(feed, day, "extract", environment, false)
 		if pipelineErr != nil {
 			pipeline.RecordError(pipelineErr)
 		}
@@ -481,7 +522,7 @@ func (store *Store) runBatch(pass passKey, batch map[string]*Future) {
 			requested[symbol] = true
 		}
 		for _, symbol := range extract {
-			target := store.ParquetPath(kind, symbol, day)
+			target := store.ParquetPath(feed, kind, symbol, day)
 			if _, err := os.Stat(target); err == nil {
 				continue
 			}
@@ -504,22 +545,22 @@ func (store *Store) runBatch(pass passKey, batch map[string]*Future) {
 		return nil
 	}()
 	if err != nil {
-		log.Printf("%s pass over %s failed: %v", kind, day, err)
+		log.Printf("%s pass over %s failed: %v", joinFeed(feed, kind, " "), day, err)
 	}
 	os.RemoveAll(work)
 
 	store.mutex.Lock()
 	for symbol, future := range batch {
-		delete(store.inflight, fileKey{kind, day, symbol})
+		delete(store.inflight, fileKey{feed, kind, day, symbol})
 		if err == nil {
-			delete(store.failures, kind+" "+symbol+" "+day)
-			future.resolve(store.ParquetPath(kind, symbol, day), nil)
+			delete(store.failures, joinFeed(feed, kind+" "+symbol+" "+day, " "))
+			future.resolve(store.ParquetPath(feed, kind, symbol, day), nil)
 		} else {
 			message := err.Error()
 			if len(message) > 300 {
 				message = message[:300]
 			}
-			store.failures[kind+" "+symbol+" "+day] = message
+			store.failures[joinFeed(feed, kind+" "+symbol+" "+day, " ")] = message
 			future.resolve("", errors.New(err.Error()))
 		}
 	}
@@ -531,9 +572,9 @@ func (store *Store) runBatch(pass passKey, batch map[string]*Future) {
 		status = "failed"
 	}
 	took := time.Since(started)
-	store.tel.finishPass(span, kind, len(symbols), took, err)
-	store.recordPass(passRecord{Kind: kind, Day: day, Symbols: len(symbols), Seconds: took.Seconds(), Status: status, Finished: time.Now()})
-	log.Printf("%s pass over %s finished in %.0fs (%s)", kind, day, took.Seconds(), status)
+	store.tel.finishPass(span, feed, kind, len(symbols), took, err)
+	store.recordPass(passRecord{Feed: feed, Kind: kind, Day: day, Symbols: len(symbols), Seconds: took.Seconds(), Status: status, Finished: time.Now()})
+	log.Printf("%s pass over %s finished in %.0fs (%s)", joinFeed(feed, kind, " "), day, took.Seconds(), status)
 	select {
 	case store.wake <- struct{}{}:
 	default:
@@ -598,11 +639,16 @@ func (store *Store) Status() Status {
 		status.Failed[key] = message
 	}
 	store.mutex.Unlock()
-	store.lookupMutex.Lock()
-	if len(store.days) > 0 {
-		count := len(store.days)
-		status.CachedDays = &count
+	most := 0
+	for _, feed := range store.feeds {
+		feed.lookupMutex.Lock()
+		if len(feed.days) > most {
+			most = len(feed.days)
+		}
+		feed.lookupMutex.Unlock()
 	}
-	store.lookupMutex.Unlock()
+	if most > 0 {
+		status.CachedDays = &most
+	}
 	return status
 }

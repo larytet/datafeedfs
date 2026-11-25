@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,9 +17,12 @@ import (
 const usage = `usage: datafeedfs-go <command>
   mount [--allow-other] CONFIG MOUNTPOINT   mount the filesystem (foreground until unmounted)
   serve CONFIG                              run only the web console (needs [ui] listen), without mounting
-  prefetch [--kind K] CONFIG DAY SYMBOL...  extract symbols for a day into the cache without mounting; K is tick (default), orderbook or stream
-  symbols CONFIG [DAY]                      print the symbols of a day (default: newest)
-  days CONFIG                               print the trading days available on the ssh host
+  prefetch [--feed F] [--kind K] CONFIG DAY SYMBOL...
+                                            extract symbols for a day into the cache without mounting; K is tick (default), orderbook or stream
+  symbols [--feed F] CONFIG [DAY]           print the symbols of a day (default: newest)
+  days [--feed F] CONFIG                    print the trading days available on the ssh host
+  feeds CONFIG                              print the configured feeds and the pcap path of each
+  F is a [feeds.F] name; it is required when the configuration has feeds
   ingest [--kind K] [--depth N] DAY SYMBOLS_FILE OUT_DIR
                                             parser helper: itch_tob records on stdin -> OUT_DIR/<SYMBOL>/<DAY>.parquet
 `
@@ -54,26 +58,36 @@ func run(command string, arguments []string) error {
 		}
 		_, _, err := Ingest(flags.Arg(0), flags.Arg(1), flags.Arg(2), *kind, *depth, os.Stdin)
 		return err
-	case "days":
+	case "feeds":
 		store, err := openStoreArg(arguments, 1)
 		if err != nil {
 			return err
 		}
-		days, err := store.Days()
+		for _, feed := range store.config.Feeds {
+			fmt.Printf("%s\t%s\t%s\n", feed.Name, feed.Remote.SSHHost, feed.pattern())
+		}
+		return nil
+	case "days":
+		store, feed, rest, err := openStoreFeed("days", arguments)
+		if err != nil {
+			return err
+		}
+		_ = rest
+		days, err := store.Days(feed)
 		for _, day := range days {
 			fmt.Println(day)
 		}
 		return err
 	case "symbols":
-		store, err := openStoreArg(arguments, 1)
+		store, feed, rest, err := openStoreFeed("symbols", arguments)
 		if err != nil {
 			return err
 		}
 		var symbols []string
-		if len(arguments) > 1 {
-			symbols, err = store.SymbolsForDay(arguments[1])
+		if len(rest) > 0 {
+			symbols, err = store.SymbolsForDay(feed, rest[0])
 		} else {
-			symbols, err = store.Symbols()
+			symbols, err = store.Symbols(feed)
 		}
 		for _, symbol := range symbols {
 			fmt.Println(symbol)
@@ -97,6 +111,7 @@ func run(command string, arguments []string) error {
 	case "prefetch":
 		flags := flag.NewFlagSet("prefetch", flag.ExitOnError)
 		kind := flags.String("kind", kindTick, "tick, orderbook or stream")
+		feed := flags.String("feed", "", "feed name ([feeds.NAME]); required when the configuration has feeds")
 		flags.Parse(arguments)
 		if flags.NArg() < 3 || !validKind(*kind) {
 			return fmt.Errorf("prefetch [--kind tick|orderbook|stream] CONFIG DAY SYMBOL...")
@@ -105,9 +120,12 @@ func run(command string, arguments []string) error {
 		if err != nil {
 			return err
 		}
+		if err := checkFeed(store, *feed); err != nil {
+			return err
+		}
 		var futures []*Future
 		for _, symbol := range flags.Args()[2:] {
-			futures = append(futures, store.Request(*kind, symbol, flags.Arg(1)))
+			futures = append(futures, store.Request(*feed, *kind, symbol, flags.Arg(1)))
 		}
 		defer store.tel.Shutdown(5 * time.Second)
 		for _, future := range futures {
@@ -133,6 +151,36 @@ func run(command string, arguments []string) error {
 	}
 	fmt.Fprint(os.Stderr, usage)
 	return fmt.Errorf("unknown command %q", command)
+}
+
+// openStoreFeed parses [--feed F] CONFIG [rest...] and opens the store.
+func openStoreFeed(name string, arguments []string) (*Store, string, []string, error) {
+	flags := flag.NewFlagSet(name, flag.ExitOnError)
+	feed := flags.String("feed", "", "feed name ([feeds.NAME]); required when the configuration has feeds")
+	flags.Parse(arguments)
+	if flags.NArg() < 1 {
+		return nil, "", nil, fmt.Errorf("missing CONFIG")
+	}
+	store, err := openStore(flags.Arg(0))
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return store, *feed, flags.Args()[1:], checkFeed(store, *feed)
+}
+
+// checkFeed rejects a missing or unknown --feed, naming the configured feeds.
+func checkFeed(store *Store, feed string) error {
+	if store.feeds[feed] != nil {
+		return nil
+	}
+	var names []string
+	for _, configured := range store.config.Feeds {
+		names = append(names, configured.Name)
+	}
+	if feed == "" {
+		return fmt.Errorf("--feed is required, one of: %s", strings.Join(names, ", "))
+	}
+	return fmt.Errorf("unknown feed %q, one of: %s", feed, strings.Join(names, ", "))
 }
 
 func openStoreArg(arguments []string, minimum int) (*Store, error) {
