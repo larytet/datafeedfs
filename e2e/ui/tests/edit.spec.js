@@ -46,6 +46,8 @@ test('a real extraction shows up as a running pass, then as cache', async ({ pag
   await expect(page.getByTestId('passes')).toContainText('No pass is running', { timeout: 20_000 });
   await expect(page.getByTestId('kinds')).toContainText('tick');
   await expect(page.getByTestId('s-cache')).not.toHaveText('0 B');
+  await expect(page.getByTestId('kinds')).toContainText(/parquet .* \(\d+ files\).*csv .* \(\d+ files\)/); // the two formats are shown separately
+  await expect(page.getByTestId('kinds')).toContainText('csv 0 B (0 files)'); // only the parquet was read
   await expect(page.getByTestId('s-fail')).toHaveText('0');
 });
 

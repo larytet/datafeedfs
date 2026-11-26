@@ -87,6 +87,8 @@ func TestUIStatusAndMetrics(t *testing.T) {
 	path := u.store.ParquetPath("", kindTick, "AAA", "2024-01-02")
 	os.MkdirAll(strings.TrimSuffix(path, "/2024-01-02.parquet"), 0o755)
 	os.WriteFile(path, make([]byte, 1234), 0o644)
+	csvPath := u.store.CSVPath("", kindTick, "AAA", "2024-01-02")
+	os.WriteFile(csvPath, make([]byte, 5000), 0o644)
 	u.store.scanCache()
 	u.store.Request("", kindTick, "AAA", "2024-01-02").Wait()
 
@@ -96,7 +98,8 @@ func TestUIStatusAndMetrics(t *testing.T) {
 	}
 	cache := body["cache"].(map[string]any)
 	tick := cache["by_kind"].(map[string]any)["tick"].(map[string]any)
-	if tick["bytes"].(float64) != 1234 || cache["files"].(float64) != 1 {
+	if tick["parquet_bytes"].(float64) != 1234 || tick["csv_bytes"].(float64) != 5000 || tick["bytes"].(float64) != 6234 ||
+		cache["files"].(float64) != 2 || cache["csv_files"].(float64) != 1 || cache["parquet_files"].(float64) != 1 || cache["csv_bytes"].(float64) != 5000 {
 		t.Errorf("cache: %v", cache)
 	}
 	passes := body["passes"].(map[string]any)

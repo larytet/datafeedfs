@@ -35,8 +35,8 @@ import (
 //	datafeedfs.passes.running          gauge     {pass}
 //	datafeedfs.passes.pending          gauge     {pass}     passes waiting for a slot
 //	datafeedfs.passes.failed           gauge     {file}     files whose last pass failed
-//	datafeedfs.cache.bytes             gauge     By         kind; refreshed by the cache scan
-//	datafeedfs.cache.files             gauge     {file}     kind
+//	datafeedfs.cache.bytes             gauge     By         kind, format (parquet|csv); refreshed by the cache scan
+//	datafeedfs.cache.files             gauge     {file}     kind, format
 //	datafeedfs.cache.limit             gauge     By         cache.max_gb, 0 = unlimited
 //
 // Traces (tracer "datafeedfs"): one span "pass" per extraction pass (kind, day, requested and extracted symbols, status) with a child span
@@ -157,9 +157,12 @@ func (telemetry *Telemetry) observe(store *Store) {
 				if store.config.Named() {
 					feed, kindName, _ = strings.Cut(kind, "/")
 				}
-				attributes := feedAttributes(feed, kindName)
-				observer.ObserveInt64(bytes, stat.Bytes, attributes)
-				observer.ObserveInt64(files, int64(stat.Files), attributes)
+				parquet := feedAttributes(feed, kindName, attribute.String("format", "parquet"))
+				observer.ObserveInt64(bytes, stat.Bytes-stat.CSVBytes, parquet)
+				observer.ObserveInt64(files, int64(stat.Files-stat.CSVFiles), parquet)
+				csv := feedAttributes(feed, kindName, attribute.String("format", "csv"))
+				observer.ObserveInt64(bytes, stat.CSVBytes, csv)
+				observer.ObserveInt64(files, int64(stat.CSVFiles), csv)
 			}
 		}
 		return nil

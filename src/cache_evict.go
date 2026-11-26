@@ -78,6 +78,12 @@ func (store *Store) scanCache() ([]cacheFile, int64) {
 			kind := stats.ByKind[key]
 			kind.Bytes += info.Size()
 			kind.Files++
+			if strings.HasSuffix(path, ".csv") {
+				kind.CSVBytes += info.Size()
+				kind.CSVFiles++
+				stats.CSVBytes += info.Size()
+				stats.CSVFiles++
+			}
 			stats.ByKind[key] = kind
 			return nil
 		})

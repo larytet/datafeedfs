@@ -10,16 +10,20 @@ import (
 // What the web console and the telemetry gauges read: cache sizes from the last scan, pass records and counters.
 
 type kindStat struct {
-	Bytes int64
-	Files int
+	Bytes    int64 // parquet and csv together
+	Files    int
+	CSVBytes int64 // the csv part of Bytes
+	CSVFiles int
 }
 
 // CacheStats is the result of one walk over the cache directories.
 type CacheStats struct {
-	At     time.Time
-	Bytes  int64
-	Files  int
-	ByKind map[string]kindStat
+	At       time.Time
+	Bytes    int64
+	Files    int
+	CSVBytes int64 // the csv part of Bytes
+	CSVFiles int
+	ByKind   map[string]kindStat
 }
 
 type passRecord struct {

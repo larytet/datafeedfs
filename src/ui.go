@@ -214,14 +214,16 @@ func (ui *uiServer) status(w http.ResponseWriter, r *http.Request) {
 	cache := map[string]any{
 		"dir": store.cache, "limit_bytes": int64(config.Cache.MaxGB * (1 << 30)), "evict_to_bytes": int64(config.Cache.MaxGB * config.Cache.EvictTo * (1 << 30)),
 		"evicted_files": store.counters.evictedFiles.Load(), "evicted_bytes": store.counters.evictedBytes.Load(),
-		"next_scan_ms": store.nextScan.Load(), "bytes": 0, "files": 0, "by_kind": map[string]any{}, "scanned_ms": 0,
+		"next_scan_ms": store.nextScan.Load(), "bytes": 0, "files": 0, "parquet_bytes": 0, "parquet_files": 0, "csv_bytes": 0, "csv_files": 0, "by_kind": map[string]any{}, "scanned_ms": 0,
 	}
 	if stats := store.cacheStats.Load(); stats != nil {
 		byKind := map[string]any{}
 		for kind, stat := range stats.ByKind {
-			byKind[kind] = map[string]any{"bytes": stat.Bytes, "files": stat.Files}
+			byKind[kind] = map[string]any{"bytes": stat.Bytes, "files": stat.Files,
+				"parquet_bytes": stat.Bytes - stat.CSVBytes, "parquet_files": stat.Files - stat.CSVFiles, "csv_bytes": stat.CSVBytes, "csv_files": stat.CSVFiles}
 		}
 		cache["bytes"], cache["files"], cache["by_kind"], cache["scanned_ms"] = stats.Bytes, stats.Files, byKind, stats.At.UnixMilli()
+		cache["parquet_bytes"], cache["parquet_files"], cache["csv_bytes"], cache["csv_files"] = stats.Bytes-stats.CSVBytes, stats.Files-stats.CSVFiles, stats.CSVBytes, stats.CSVFiles
 	}
 	if store.sampler != nil {
 		_, _, host := store.sampler.Snapshot()

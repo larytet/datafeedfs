@@ -285,7 +285,7 @@ The standard `OTEL_EXPORTER_OTLP_*` variables (headers, certificates, timeouts) 
 | `datafeedfs.passes` | counter | `kind`, `status` |
 | `datafeedfs.cache.evicted.files`, `.bytes` | counters | |
 | `datafeedfs.passes.running`, `.pending`, `.failed` | gauges | |
-| `datafeedfs.cache.bytes`, `.files` | gauges, as of the last cache scan | `kind` |
+| `datafeedfs.cache.bytes`, `.files` | gauges, as of the last cache scan | `kind`, `format` = parquet, csv (sum over `format` for the total) |
 | `datafeedfs.cache.limit` | gauge, bytes (0 = unlimited) | |
 
 Traces: a span `pass` per extraction pass (`kind`, `day`, `symbols.requested`, `status`, the error when it failed) with a child span `pipeline` around `ssh cat | decompress | decoder | ingest`. Individual reads are not traced. The decoder and `xz` are child processes and are not instrumented; host CPU and network belong to the collector's `hostmetrics` receiver.
