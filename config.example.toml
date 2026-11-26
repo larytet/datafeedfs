@@ -29,6 +29,8 @@ dir = "~/.cache/datafeedfs"
 # evict_to = 0.9
 # scan_interval_seconds = 600
 # touch_interval_seconds = 3600
+# A csv is a large copy rendered from the parquet. Once nobody has it open for this long it is deleted (and rendered again on the next read).
+# csv_idle_seconds = 60       # negative keeps csv files
 
 [orderbook]
 depth = 5                    # price levels per side in /orderbook (1 to 64); a different depth is a separate cache

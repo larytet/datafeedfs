@@ -166,3 +166,73 @@ func (store *Store) evictLoop() {
 		}
 	}
 }
+
+// csvState tracks the use of one rendered csv file. A csv is a convenience copy of the parquet, several times larger, so it is kept
+// only while somebody reads it: once no handle is open and csv_idle_seconds have passed, the janitor deletes it.
+type csvState struct {
+	open int       // handles currently open on the file
+	last time.Time // last open or release
+}
+
+// csvJanitor deletes idle csv files. Files found at start (left by an earlier run) get a full idle period from the start.
+func (store *Store) csvJanitor() {
+	idle := time.Duration(store.config.Cache.CSVIdleSeconds * float64(time.Second))
+	if idle <= 0 {
+		return
+	}
+	now := time.Now()
+	entries, _ := os.ReadDir(store.cache)
+	store.csvMutex.Lock()
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), "_") {
+			continue
+		}
+		filepath.WalkDir(filepath.Join(store.cache, entry.Name()), func(path string, entry fs.DirEntry, err error) error {
+			if err == nil && !entry.IsDir() && strings.HasSuffix(path, ".csv") && store.csvUse[path] == nil {
+				store.csvUse[path] = &csvState{last: now}
+			}
+			return nil
+		})
+	}
+	store.csvMutex.Unlock()
+	tick := idle / 4
+	if tick < time.Second {
+		tick = time.Second
+	}
+	if tick > 10*time.Second {
+		tick = 10 * time.Second
+	}
+	for range time.Tick(tick) {
+		store.evictIdleCSV(idle)
+	}
+}
+
+// evictIdleCSV deletes the csv files that have had no open handle for idle. It returns how many it deleted.
+func (store *Store) evictIdleCSV(idle time.Duration) (deletedFiles int) {
+	var deletedBytes int64
+	store.csvMutex.Lock()
+	defer store.csvMutex.Unlock()
+	for path, state := range store.csvUse {
+		if state.open > 0 || time.Since(state.last) < idle {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err == nil {
+			if os.Remove(path) != nil {
+				continue
+			}
+			deletedFiles++
+			deletedBytes += info.Size()
+		}
+		delete(store.csvUse, path) // also forgets files that the size cap removed first
+		store.touchMutex.Lock()
+		delete(store.touched, path)
+		store.touchMutex.Unlock()
+	}
+	if deletedFiles > 0 {
+		store.counters.evictedFiles.Add(int64(deletedFiles))
+		store.counters.evictedBytes.Add(deletedBytes)
+		store.tel.evicted(deletedFiles, deletedBytes)
+	}
+	return deletedFiles
+}

@@ -92,7 +92,8 @@ type Store struct {
 	wake         chan struct{}
 
 	feeds    map[string]*feedState
-	csvMutex sync.Mutex
+	csvMutex sync.Mutex // guards csvUse and the rendering and deletion of csv files
+	csvUse   map[string]*csvState
 
 	startedAt  time.Time
 	mountpoint string // set by mount; empty when serving the console without a mount
@@ -115,7 +116,7 @@ func NewStore(config *Config) (*Store, error) {
 		config: config, cache: config.CacheDir,
 		pending: map[passKey]map[string]*Future{}, firstRequest: map[passKey]time.Time{}, inflight: map[fileKey]*Future{},
 		runningDays: map[passKey]bool{}, failures: map[string]string{}, wake: make(chan struct{}, 1),
-		touched: map[string]time.Time{}, evictPause: 2 * time.Second,
+		csvUse: map[string]*csvState{}, touched: map[string]time.Time{}, evictPause: 2 * time.Second,
 		startedAt: time.Now(), running: map[passKey]*runInfo{}, tel: newTelemetry(config),
 	}
 	for _, feed := range config.Feeds {
@@ -133,6 +134,7 @@ func NewStore(config *Config) (*Store, error) {
 		}
 	}
 	go store.scheduler()
+	go store.csvJanitor()
 	if config.Cache.MaxGB > 0 || config.UI.Listen != "" || config.Telemetry.metricsOn() {
 		go store.evictLoop() // also measures the cache for the console and the gauges
 	}
@@ -376,6 +378,8 @@ func (store *Store) CSVPath(feed, kind, symbol, day string) string {
 	return filepath.Join(store.kindDir(feed, kind), symbol, day+".csv")
 }
 
+// EnsureCSV renders the csv when it is missing and marks it in use. The caller must call ReleaseCSV(path) when it is done with it;
+// until then the idle eviction (csv_idle_seconds) leaves the file alone.
 func (store *Store) EnsureCSV(feed, kind, symbol, day string) (string, error) {
 	target := store.CSVPath(feed, kind, symbol, day)
 	store.csvMutex.Lock()
@@ -387,7 +391,26 @@ func (store *Store) EnsureCSV(feed, kind, symbol, day string) (string, error) {
 	} else {
 		store.touch(target)
 	}
+	state := store.csvUse[target]
+	if state == nil {
+		state = &csvState{}
+		store.csvUse[target] = state
+	}
+	state.open++
+	state.last = time.Now()
 	return target, nil
+}
+
+// ReleaseCSV ends one use taken by EnsureCSV; the idle clock of the file starts now.
+func (store *Store) ReleaseCSV(path string) {
+	store.csvMutex.Lock()
+	defer store.csvMutex.Unlock()
+	if state := store.csvUse[path]; state != nil {
+		if state.open > 0 {
+			state.open--
+		}
+		state.last = time.Now()
+	}
 }
 
 // ----- extraction ------------------------------------------------------------------------------------------------------------

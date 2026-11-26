@@ -16,18 +16,18 @@ for argument in "$@"; do
     esac
 done
 
-NETWORK=dfs-e2e SSHD=dfs-e2e-sshd APP=dfs-e2e-app DAY=2026-11-20
+NETWORK=dfs-e2e SSHD=dfs-e2e-sshd APP=dfs-e2e-app APP2=dfs-e2e-app2 DAY=2026-11-20
 PCAP=testdata/pcaps/2026/11/20/nasdaq_tv.pcap.xz
 WORK=$(mktemp -d)
 failures=0
 
 cleanup() {
     if [ "$keep" -eq 0 ]; then
-        docker rm -fv "$APP" "$SSHD" >/dev/null 2>&1 || true
+        docker rm -fv "$APP" "$APP2" "$SSHD" >/dev/null 2>&1 || true
         docker network rm "$NETWORK" >/dev/null 2>&1 || true
         rm -rf "$WORK"
     else
-        echo "containers left running: $APP $SSHD (docker rm -fv $APP $SSHD; docker network rm $NETWORK)"
+        echo "containers left running: $APP $APP2 $SSHD (docker rm -fv $APP $APP2 $SSHD; docker network rm $NETWORK)"
     fi
 }
 trap cleanup EXIT
@@ -45,7 +45,7 @@ if [ ! -s "$PCAP" ] || head -c 40 "$PCAP" | grep -q "git-lfs.github.com"; then
     exit 2
 fi
 pass "capture $PCAP ($(du -h "$PCAP" | cut -f1))"
-docker rm -fv "$APP" "$SSHD" >/dev/null 2>&1 || true
+docker rm -fv "$APP" "$APP2" "$SSHD" >/dev/null 2>&1 || true
 docker network rm "$NETWORK" >/dev/null 2>&1 || true
 
 step "1. build the images"
@@ -152,6 +152,32 @@ mounted "tick/AAPL/$DAY.csv" > "$WORK/tick.AAPL.again.csv"
 after=$(docker logs "$APP" 2>&1 | grep -c "pass over" || true)
 [ "$after" -gt "$before" ] && pass "the least recently used file was evicted and is extracted again" || fail "tick/AAPL was not evicted"
 cmp -s "$WORK/tick.AAPL.csv" "$WORK/tick.AAPL.again.csv" && pass "the re-extracted file is identical" || fail "the re-extracted tick/AAPL differs"
+
+step "10. an idle csv file is deleted (csv_idle_seconds = 5, no size cap) and rendered again on the next read"
+sed -e '/^max_gb/d' -e 's/^csv_idle_seconds = .*/csv_idle_seconds = 5/' e2e/config.e2e.toml > "$WORK/config2.toml"
+docker run -d --name "$APP2" --network "$NETWORK" --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined \
+    -v "$WORK/config2.toml:/config/config.toml:ro" -v "$WORK/id_e2e:/root/.ssh/id_e2e:ro" -v "$WORK/known_hosts:/root/.ssh/known_hosts:ro" datafeedfs-e2e >/dev/null
+for _ in $(seq 1 40); do docker exec "$APP2" mountpoint -q /mnt/datafeed 2>/dev/null && break; sleep 0.5; done
+docker exec "$APP2" mountpoint -q /mnt/datafeed || { fail "second container not mounted"; docker logs "$APP2" >&2; exit 1; }
+docker exec "$APP2" cat "/mnt/datafeed/stream/SPY/$DAY.csv" > "$WORK/stream.SPY.first.csv"
+csv=$(docker exec "$APP2" find /cache -name "$DAY.csv" -path '*stream*' -path '*SPY*')
+[ -n "$csv" ] && docker exec "$APP2" test -s "$csv" && pass "the csv exists right after the read ($csv)" || fail "no csv file after the read"
+parquet="${csv%.csv}.parquet"
+gone=0
+for _ in $(seq 1 30); do
+    docker exec "$APP2" test -e "$csv" || { gone=1; break; }
+    sleep 1
+done
+[ "$gone" = 1 ] && pass "the csv was deleted after it had been idle" || fail "the csv is still there 30 s after the read"
+docker exec "$APP2" test -s "$parquet" && pass "the parquet is kept" || fail "the parquet was deleted"
+before=$(docker logs "$APP2" 2>&1 | grep -c "pass over" || true)
+docker exec "$APP2" cat "/mnt/datafeed/stream/SPY/$DAY.csv" > "$WORK/stream.SPY.second.csv"
+after=$(docker logs "$APP2" 2>&1 | grep -c "pass over" || true)
+[ "$before" = "$after" ] && pass "reading it again renders the csv from the parquet: no new pass over the capture" || fail "the csv read started a new pass"
+cmp -s "$WORK/stream.SPY.first.csv" "$WORK/stream.SPY.second.csv" && pass "the re-rendered csv is identical" || fail "the re-rendered csv differs"
+# a file that is held open is not deleted underneath its reader
+docker exec "$APP2" sh -c "exec 3< /mnt/datafeed/stream/SPY/$DAY.csv; sleep 12; test -e '$csv' && head -c 1 <&3 >/dev/null" \
+    && pass "a csv that is open is not deleted while it is read" || fail "an open csv was deleted"
 
 echo
 if [ "$failures" -eq 0 ]; then echo "e2e: all checks passed"; else echo "e2e: $failures check(s) FAILED" >&2; docker logs "$APP" 2>&1 | tail -20 >&2; exit 1; fi

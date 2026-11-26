@@ -56,6 +56,7 @@ type CacheConfig struct {
 	EvictTo              float64 `toml:"evict_to"`               // once over the cap, delete down to this fraction of it (default 0.9)
 	ScanIntervalSeconds  float64 `toml:"scan_interval_seconds"`  // how often the cache size is checked (default 600)
 	TouchIntervalSeconds float64 `toml:"touch_interval_seconds"` // a file's access time is bumped at most this often (default 3600)
+	CSVIdleSeconds       float64 `toml:"csv_idle_seconds"`       // a csv file nobody has open for this long is deleted; it is rendered again from the parquet on the next read (default 60, negative = keep)
 	MinAgeSeconds        float64 `toml:"min_age_seconds"`        // files used more recently than this are never evicted (default and floor: touch interval)
 }
 
@@ -318,6 +319,9 @@ func (cache *CacheConfig) normalize() error {
 	}
 	if cache.EvictTo <= 0 || cache.EvictTo > 1 {
 		return fmt.Errorf("cache.evict_to must be in (0, 1]")
+	}
+	if cache.CSVIdleSeconds == 0 {
+		cache.CSVIdleSeconds = 60
 	}
 	if cache.ScanIntervalSeconds == 0 {
 		cache.ScanIntervalSeconds = 600

@@ -98,3 +98,31 @@ func TestCacheConfigFromToml(t *testing.T) {
 		t.Fatalf("%+v", config.Cache)
 	}
 }
+
+func TestIdleCSVEviction(t *testing.T) {
+	store := evictTestStore(t, 0)
+	idle := time.Minute
+	csv := func(symbol string) string {
+		path := store.CSVPath("", kindTick, symbol, "2024-01-02")
+		os.MkdirAll(filepath.Dir(path), 0o755)
+		os.WriteFile(path, make([]byte, 1000), 0o644)
+		return path
+	}
+	inUse, idleOne, recent := csv("AAA"), csv("BBB"), csv("CCC")
+	store.csvMutex.Lock()
+	store.csvUse[inUse] = &csvState{open: 1, last: time.Now().Add(-time.Hour)}
+	store.csvUse[idleOne] = &csvState{last: time.Now().Add(-2 * time.Minute)}
+	store.csvUse[recent] = &csvState{last: time.Now().Add(-10 * time.Second)}
+	store.csvMutex.Unlock()
+
+	if got := store.evictIdleCSV(idle); got != 1 {
+		t.Fatalf("deleted %d csv files, want 1", got)
+	}
+	if exists(idleOne) || !exists(inUse) || !exists(recent) {
+		t.Fatalf("idle exists=%v, open exists=%v, recent exists=%v", exists(idleOne), exists(inUse), exists(recent))
+	}
+	store.ReleaseCSV(inUse) // released: the idle clock starts now, so it stays for a full period
+	if store.evictIdleCSV(idle) != 0 || !exists(inUse) {
+		t.Fatal("a just-released csv must not be deleted")
+	}
+}

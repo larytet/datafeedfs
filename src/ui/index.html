@@ -319,6 +319,7 @@ var FIELDS=[
  {sec:'cache',key:'max_gb',type:'float',def:0,min:0,help:'Size cap of cached files in GiB. 0 means unlimited: nothing is evicted.'},
  {sec:'cache',key:'evict_to',type:'float',def:0.9,min:0.01,max:1,help:'Once over the cap, delete the least recently used files down to this fraction of it.'},
  {sec:'cache',key:'scan_interval_seconds',type:'float',def:600,min:1,help:'How often the cache size is checked.'},
+ {sec:'cache',key:'csv_idle_seconds',type:'float',def:60,help:'A csv file nobody has open for this many seconds is deleted and rendered again from the parquet on the next read. Negative keeps csv files.'},
  {sec:'cache',key:'touch_interval_seconds',type:'float',def:3600,min:1,help:'A read bumps a file’s access time at most this often.'},
  {sec:'orderbook',key:'depth',type:'int',def:5,min:1,max:64,help:'Price levels per side in /orderbook.',impact:'A different depth is a separate cache. Cached files of the old depth are not reused.'},
  {sec:'extract',key:'batch_window_seconds',type:'float',def:3,min:0,help:'Requests for one day inside this window share one pass over the pcap.'},

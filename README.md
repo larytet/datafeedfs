@@ -221,6 +221,10 @@ Troubleshooting:
 - I/O: every pass reads the whole compressed pcap over ssh from the host (tens of GB for Nasdaq), so several passes share the host's disk, network and its single `sshd` encryption core.
   Raising `max_parallel` helps until that, or the CPU of the machine running the container, becomes the limit.
 
+## CSV files are short-lived
+
+A `.csv` is rendered from the parquet on first read and is several times larger. It is deleted once no handle has been open on it for `[cache] csv_idle_seconds` (default 60; negative keeps csv files). The next read renders it again from the parquet, which is cheap (no pass over the pcap). A file that is open is never deleted underneath its reader. This is independent of `max_gb`.
+
 ## Cache size cap (LRU eviction)
 
 By default the cache grows without bound. Set `[cache] max_gb` to cap the parquet and csv files (the `_work`, `_logs` and `_symbols` directories are not counted). Eviction is lazy so that reads never churn the disk:

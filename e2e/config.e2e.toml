@@ -14,6 +14,8 @@ dir = "/cache"
 max_gb = 0.0093
 scan_interval_seconds = 5
 touch_interval_seconds = 1
+# csv files stay: the cap test above counts on them (step 10 runs a second container with a short idle time)
+csv_idle_seconds = -1
 
 [orderbook]
 depth = 5

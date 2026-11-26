@@ -295,7 +295,10 @@ func (node *fileNode) Getattr(ctx context.Context, handle fs.FileHandle, out *fu
 	return 0
 }
 
-type fileHandle struct{ file *os.File }
+type fileHandle struct {
+	file    *os.File
+	release func() // called once when the handle is released
+}
 
 var (
 	_ fs.FileReader   = (*fileHandle)(nil)
@@ -312,6 +315,9 @@ func (handle *fileHandle) Read(ctx context.Context, destination []byte, offset i
 
 func (handle *fileHandle) Release(ctx context.Context) syscall.Errno {
 	handle.file.Close()
+	if handle.release != nil {
+		handle.release()
+	}
 	return 0
 }
 
@@ -333,20 +339,26 @@ func (node *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, ui
 			node.store.tel.open(node.feed, node.kind, hit, time.Since(started))
 		}
 		path := node.store.ParquetPath(node.feed, node.kind, node.symbol, node.day)
+		var release func()
 		if node.extension == "csv" {
 			var err error
 			if path, err = node.store.EnsureCSV(node.feed, node.kind, node.symbol, node.day); err != nil {
 				return nil, 0, syscall.EIO
 			}
+			csvPath := path
+			release = func() { node.store.ReleaseCSV(csvPath) }
 		}
 		file, err := os.Open(path)
+		if err != nil && release != nil {
+			release()
+		}
 		if errors.Is(err, os.ErrNotExist) && attempt == 0 {
 			continue // evicted between the lookup and the open: request it again
 		}
 		if err != nil {
 			return nil, 0, syscall.EIO
 		}
-		return &fileHandle{file: file}, fuse.FOPEN_DIRECT_IO, 0
+		return &fileHandle{file: file, release: release}, fuse.FOPEN_DIRECT_IO, 0
 	}
 }
 
